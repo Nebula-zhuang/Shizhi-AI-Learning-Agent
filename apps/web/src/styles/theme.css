@@ -1,0 +1,724 @@
+/**
+ * Learning Buddy 设计令牌 · v2
+ * ============================================================================
+ *
+ * ## 方向：editorial + technology ——「有光的书房」
+ *
+ * v1 是**一张摊开的书桌**：暖纸、衬线、克制的圆角。那套底子是对的 ——
+ * 纯白 + 冷灰才是"管理后台"的脸，暖纸才有"在读东西"而不是"在操作数据"的感觉。
+ *
+ * v2 保留这套底色，补上 v1 真正缺的三样东西：
+ *
+ *   1. **空间**。v1 只有一个平面（纸）贴在另一个平面（页）上，
+ *      所有东西都"一样近"。v2 建立四级表面 + 四级高程，
+ *      让"浮在上面"和"垫在下面"成为可表达的语言。
+ *   2. **光**。页面不再是均匀照亮的。加一层极淡的暖光池（光晕），
+ *      把视线引向内容；焦点、激活、生成中的元素带一圈很轻的外发光。
+ *   3. **动势**。统一时长与缓动，让界面"在呼吸"而不是"在跳"。
+ *
+ * ## 两条硬约束（不因为好看而让步）
+ *
+ * - **光只能服务内容，不能覆盖内容。** 光晕的不透明度上限压得很低，
+ *   且**永远不放在文字下面**。任何一处光晕如果让正文对比度掉下 4.5:1，就是错的。
+ * - **玻璃只给浮层。** 侧边栏、弹层、悬浮面板可以用玻璃质感；
+ *   内容卡片一律用实心表面 —— 整站玻璃卡片会同时毁掉可读性和质感。
+ *
+ * ## 暗色主题
+ *
+ * 不是"把亮色反相"。暗色下暖纸变成**深褐灰（不是纯黑，也不是蓝黑）**，
+ * 墨色变成暖象牙白，主色提亮以保证在暗底上的对比度。
+ * 两套主题共用同一批令牌名，切换只是覆盖变量的值。
+ *
+ * 对比度：两套主题下正文墨色对底色的对比度均 ≥ 4.5:1（WCAG AA）。
+ * `ink-4` 仅用于装饰性元素与禁用态，**不承载信息**。
+ */
+
+@theme {
+  /* ══════════════════════════════════════════════════════════════════
+     一、画布与氛围
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 页面最底层。比 surface 略深，让抬起的表面有"浮起"的参照 */
+  --color-canvas: #f7f3ec;
+  /* 画布上的光池。
+     浓度必须压到「注意到就说不出所以然」的程度 ——
+     给到 0.1 时整页会泛成一片橙，像蒙了层脏玻璃；
+     现在是 0.05 以下：单看察觉不到，但去掉后会立刻觉得"平了"。 */
+  --color-halo-warm: rgb(200 162 102 / 0.05);
+  --color-halo-cool: rgb(27 107 84 / 0.032);
+
+  /* ══════════════════════════════════════════════════════════════════
+     二、表面层级（四层，由深到浅）
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 保留 v1 命名，未迁移组件继续可用 */
+  --color-paper: var(--color-canvas);
+  --color-paper-raised: #fffdf9;
+  /* 下沉区域：输入内槽、代码块、折叠区 */
+  --color-paper-sunken: #efe9dd;
+
+  /* 语义化表面：surface-1 内容卡 / surface-2 抬起 / surface-3 浮层 */
+  --color-surface-1: #fffdf9;
+  --color-surface-2: #fffefc;
+  --color-surface-3: #ffffff;
+
+  /* 玻璃：只给侧边栏、弹层、悬浮控件用 */
+  --color-glass: rgb(255 253 249 / 0.72);
+  --color-glass-strong: rgb(255 253 249 / 0.88);
+  --color-glass-line: rgb(255 255 255 / 0.6);
+
+  /* ══════════════════════════════════════════════════════════════════
+     三、线与墨
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 发丝线。暖灰而非冷灰，否则整页会"发蓝" */
+  --color-line: #e6dfd3;
+  --color-line-strong: #d5cbbb;
+  --color-line-faint: rgb(60 48 32 / 0.06);
+
+  /* 墨。暖褐黑，不是纯黑 —— 纯黑在暖底上刺眼 */
+  --color-ink-1: #1e1a15; /* 标题 */
+  --color-ink-2: #4e463e; /* 正文 */
+  --color-ink-3: #6f665c; /* 次要信息（4.7:1，仍达 AA 正文） */
+  --color-ink-4: #9c9288; /* 装饰 / 禁用，不承载信息 */
+
+  /* ══════════════════════════════════════════════════════════════════
+     四、语义色
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 主色：墨绿。「掌握」与主行动共用一个颜色 —— 在这个产品里，
+     绿色按钮和"学会了"本来就是同一件事。 */
+  --color-moss: #1b6b54;
+  --color-moss-ink: #14503f;
+  --color-moss-soft: #eaf2ee;
+  --color-moss-line: #c9ddd4;
+
+  /* 待复习：赭。像书签的暖黄褐 —— 是"提醒"，不是"警告" */
+  --color-sienna: #9a5a24;
+  --color-sienna-ink: #7a4519;
+  --color-sienna-soft: #f8eee1;
+  --color-sienna-line: #eddcc4;
+
+  /* 薄弱：绛。比正红低饱和，不制造焦虑 */
+  --color-brick: #a83a2b;
+  --color-brick-ink: #862c20;
+  --color-brick-soft: #f8ebe8;
+  --color-brick-line: #eed5ce;
+
+  /* 学习中：靛青。偏暖的蓝，与纸底不打架 */
+  --color-slate-blue: #2e5a7a;
+  --color-slate-blue-soft: #eaeff4;
+  --color-slate-blue-line: #d3e0ea;
+
+  /* ══════════════════════════════════════════════════════════════════
+     五、字体与字号
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 本机已安装，不走网络加载 —— 演示现场不怕断网，也没有字体闪烁 */
+  --font-serif:
+    'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'SimSun', Georgia,
+    'Times New Roman', serif;
+  --font-sans:
+    'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui,
+    -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+
+  /* v2 新增：展示级标题。品牌区与首页问候语用 */
+  --text-display: 2.75rem; /* 44px */
+  --text-display--line-height: 1.15;
+
+  --text-2xs: 0.75rem; /* 12px 角标 */
+  --text-xs: 0.8125rem; /* 13px 标签、元信息 */
+  --text-sm: 0.875rem; /* 14px 界面正文 */
+  --text-base: 1rem; /* 16px 阅读正文 */
+  --text-lg: 1.125rem; /* 18px 小节标题 */
+  --text-xl: 1.375rem; /* 22px 区块标题 */
+  --text-2xl: 1.75rem; /* 28px 页面标题 */
+  --text-3xl: 2.125rem; /* 34px 品牌标题 */
+
+  --text-2xs--line-height: 1.4;
+  --text-xs--line-height: 1.55;
+  --text-sm--line-height: 1.7;
+  --text-base--line-height: 1.85; /* 中文正文需要比西文更松的行距 */
+  --text-lg--line-height: 1.6;
+  --text-xl--line-height: 1.45;
+  --text-2xl--line-height: 1.3;
+  --text-3xl--line-height: 1.22;
+
+  /* ══════════════════════════════════════════════════════════════════
+     六、间距刻度（4px 基准）
+     ══════════════════════════════════════════════════════════════════ */
+
+  --space-0-5: 0.125rem; /* 2 */
+  --space-1: 0.25rem; /* 4 */
+  --space-1-5: 0.375rem; /* 6 */
+  --space-2: 0.5rem; /* 8 */
+  --space-3: 0.75rem; /* 12 */
+  --space-4: 1rem; /* 16 */
+  --space-5: 1.25rem; /* 20 */
+  --space-6: 1.5rem; /* 24 */
+  --space-8: 2rem; /* 32 */
+  --space-10: 2.5rem; /* 40 */
+  --space-12: 3rem; /* 48 */
+  --space-16: 4rem; /* 64 */
+  --space-20: 5rem; /* 80 */
+
+  /* 布局常量：侧边栏、内容最大宽度、阅读行宽 */
+  --size-sidebar: 232px;
+  --size-sidebar-collapsed: 68px;
+  --size-topbar: 60px;
+  --size-content-max: 1240px;
+  --size-reading: 68ch;
+
+  /* ══════════════════════════════════════════════════════════════════
+     七、圆角
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 纸张美学：圆角克制。过大的圆角是"通用 SaaS 卡片"的标志 */
+  --radius-xs: 3px;
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
+
+  /* ══════════════════════════════════════════════════════════════════
+     八、高程（阴影）
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* 暖色阴影（带褐色 alpha）。冷灰阴影在暖底上会显脏。
+     每级都是三层叠加：贴地接触影 + 中距扩散 + 远距环境影 —— 单层阴影永远"假"。 */
+  --shadow-e0: 0 1px 1px rgb(60 48 32 / 0.03), 0 1px 2px rgb(60 48 32 / 0.04);
+  --shadow-e1:
+    0 1px 1px rgb(60 48 32 / 0.03), 0 2px 4px -1px rgb(60 48 32 / 0.05),
+    0 6px 14px -6px rgb(60 48 32 / 0.06);
+  --shadow-e2:
+    0 1px 2px rgb(60 48 32 / 0.04), 0 4px 10px -2px rgb(60 48 32 / 0.07),
+    0 14px 28px -12px rgb(60 48 32 / 0.1);
+  --shadow-e3:
+    0 2px 4px rgb(60 48 32 / 0.05), 0 10px 24px -6px rgb(60 48 32 / 0.1),
+    0 28px 56px -20px rgb(60 48 32 / 0.14);
+  --shadow-e4:
+    0 4px 8px rgb(60 48 32 / 0.06), 0 18px 40px -10px rgb(60 48 32 / 0.14),
+    0 44px 88px -32px rgb(60 48 32 / 0.2);
+
+  /* v1 别名，未迁移组件继续可用 */
+  --shadow-page: var(--shadow-e0);
+  --shadow-raised: var(--shadow-e1);
+  --shadow-float: var(--shadow-e3);
+
+  /* 光晕：只给"激活/生成中/焦点"，且强度必须压得住 */
+  --glow-moss: 0 0 0 1px rgb(27 107 84 / 0.18), 0 0 0 6px rgb(27 107 84 / 0.07);
+  --glow-sienna: 0 0 0 1px rgb(154 90 36 / 0.18), 0 0 0 6px rgb(154 90 36 / 0.07);
+  --glow-soft: 0 0 24px -4px rgb(196 150 84 / 0.28);
+
+  /* ══════════════════════════════════════════════════════════════════
+     九、动效
+     ══════════════════════════════════════════════════════════════════ */
+
+  --dur-instant: 90ms;
+  --dur-fast: 150ms;
+  --dur-normal: 240ms;
+  --dur-slow: 380ms;
+  --dur-slower: 620ms;
+
+  /* 起步快、收尾稳 —— 比 ease 更有"被推动"的手感 */
+  --ease-out-quart: cubic-bezier(0.165, 0.84, 0.44, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  /* 进场：轻微过冲，只给"出现"用，不给"布局变化"用 */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+  --ease-in-out-soft: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Radix 折叠面板 */
+  --animate-expand: expand 240ms var(--ease-out-quart);
+  --animate-collapse: collapse 200ms var(--ease-out-quart);
+
+  /* v2：界面"呼吸"。只用于等待态与空态的提示性元素 */
+  --animate-breathe: breathe 3.2s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
+  --animate-flow: flow 2.4s linear infinite;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   暗色主题：深褐灰而不是纯黑 / 蓝黑
+   ══════════════════════════════════════════════════════════════════════ */
+
+[data-theme='dark'] {
+  --color-canvas: #14120f;
+  --color-halo-warm: rgb(196 150 84 / 0.13);
+  --color-halo-cool: rgb(64 148 122 / 0.09);
+
+  --color-paper: #1a1714;
+  --color-paper-raised: #211d19;
+  --color-paper-sunken: #100e0c;
+
+  --color-surface-1: #1e1a16;
+  --color-surface-2: #231f1a;
+  --color-surface-3: #2a2520;
+
+  --color-glass: rgb(30 26 22 / 0.72);
+  --color-glass-strong: rgb(30 26 22 / 0.9);
+  --color-glass-line: rgb(255 255 255 / 0.08);
+
+  --color-line: #322c25;
+  --color-line-strong: #443c33;
+  --color-line-faint: rgb(255 255 255 / 0.05);
+
+  /* 暗底上用暖象牙白。纯白在深褐灰上会"发光"刺眼 */
+  --color-ink-1: #f5efe4;
+  --color-ink-2: #cdc4b6;
+  --color-ink-3: #9d9384;
+  --color-ink-4: #6f665b;
+
+  /* 主色提亮：墨绿在深底上太沉，看不清 */
+  --color-moss: #4aaa8b;
+  --color-moss-ink: #6cc0a3;
+  --color-moss-soft: rgb(74 170 139 / 0.13);
+  --color-moss-line: rgb(74 170 139 / 0.28);
+
+  --color-sienna: #d08a48;
+  --color-sienna-ink: #e0a166;
+  --color-sienna-soft: rgb(208 138 72 / 0.13);
+  --color-sienna-line: rgb(208 138 72 / 0.28);
+
+  --color-brick: #d9705c;
+  --color-brick-ink: #e68d7b;
+  --color-brick-soft: rgb(217 112 92 / 0.13);
+  --color-brick-line: rgb(217 112 92 / 0.28);
+
+  --color-slate-blue: #6fa3c9;
+  --color-slate-blue-soft: rgb(111 163 201 / 0.13);
+  --color-slate-blue-line: rgb(111 163 201 / 0.28);
+
+  /* 暗底阴影要更黑更沉，否则"浮不起来" */
+  --shadow-e0: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-e1: 0 1px 2px rgb(0 0 0 / 0.32), 0 4px 10px -4px rgb(0 0 0 / 0.4);
+  --shadow-e2: 0 2px 4px rgb(0 0 0 / 0.34), 0 10px 24px -8px rgb(0 0 0 / 0.46);
+  --shadow-e3: 0 4px 8px rgb(0 0 0 / 0.36), 0 18px 40px -12px rgb(0 0 0 / 0.52);
+  --shadow-e4: 0 8px 16px rgb(0 0 0 / 0.4), 0 36px 72px -24px rgb(0 0 0 / 0.6);
+
+  --glow-moss: 0 0 0 1px rgb(74 170 139 / 0.32), 0 0 0 6px rgb(74 170 139 / 0.1);
+  --glow-sienna: 0 0 0 1px rgb(208 138 72 / 0.32), 0 0 0 6px rgb(208 138 72 / 0.1);
+  --glow-soft: 0 0 28px -4px rgb(196 150 84 / 0.3);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   关键帧
+   ══════════════════════════════════════════════════════════════════════ */
+
+@keyframes expand {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes collapse {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+/* 呼吸：等待态用。幅度压得很小 —— 大起大落会让人烦躁 */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.04);
+  }
+}
+
+/* 骨架屏的扫光 */
+@keyframes shimmer {
+  0% {
+    background-position: -140% 0;
+  }
+  100% {
+    background-position: 240% 0;
+  }
+}
+
+/* 连线流动：沿着路径走的一小段高光 */
+@keyframes flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -32;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   基础层
+   ══════════════════════════════════════════════════════════════════════ */
+
+@layer base {
+  html {
+    font-size: 16px;
+    /* 主题切换时不要闪白 */
+    background-color: var(--color-canvas);
+  }
+
+  body {
+    margin: 0;
+    color: var(--color-ink-2);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-color: var(--color-canvas);
+    /* 氛围层：两团极淡的暖光铺在画布上，把视线引向内容区。
+       固定不动（fixed），滚动时不跟着走 —— 光属于"房间"，不属于"纸"。 */
+    background-image:
+      radial-gradient(58rem 34rem at 18% -16%, var(--color-halo-warm), transparent 60%),
+      radial-gradient(46rem 32rem at 98% 4%, var(--color-halo-cool), transparent 56%);
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+    /* 主题切换的过渡。刻意只过渡颜色，不过渡阴影/尺寸 —— 那些会让切换显得"晃" */
+    transition:
+      background-color var(--dur-normal) var(--ease-out-quart),
+      color var(--dur-normal) var(--ease-out-quart);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-serif);
+    color: var(--color-ink-1);
+    font-weight: 600; /* 中文衬线在 500 以下会发虚 */
+    letter-spacing: 0.01em;
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  /* 键盘可达性：焦点必须可见，且用主色而不是浏览器默认蓝框 */
+  :focus-visible {
+    outline: 2px solid var(--color-moss);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  /* 选中文本用主色的淡底 */
+  ::selection {
+    background-color: var(--color-moss-soft);
+    color: var(--color-moss-ink);
+  }
+
+  /* 滚动条：细、无按钮、悬停才显色。默认滚动条是"网页感"的主要来源之一 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-line-strong);
+    border: 3px solid transparent;
+    border-radius: var(--radius-full);
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-ink-4);
+  }
+
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   组件层：只放"具有设计语义、需要跨页复用"的类。
+   具体的间距与尺寸由 Tailwind 原子类在使用处决定。
+   ══════════════════════════════════════════════════════════════════════ */
+
+@layer components {
+  /* ---------------------------------------------------------- 表面 */
+  .surface {
+    background-color: var(--color-surface-1);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-e1);
+  }
+
+  /* v1 别名：内容卡就是 surface-1 + 抬升 */
+  .paper {
+    background-color: var(--color-surface-1);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-e1);
+  }
+
+  /* 玻璃浮层。只给侧边栏、弹层、悬浮控件 —— 内容卡一律用实心。
+     整站玻璃会同时毁掉可读性和质感（玻璃一多就没有"玻璃"了）。 */
+  .glass {
+    background-color: var(--color-glass);
+    backdrop-filter: blur(16px) saturate(150%);
+    -webkit-backdrop-filter: blur(16px) saturate(150%);
+    border: 1px solid var(--color-glass-line);
+  }
+
+  /* 内容卡的可交互态：只抬一级 + 边框变深，不做位移。
+     位移会让整片卡片"抖"，在密集布局里很廉价。 */
+  .surface-interactive {
+    transition:
+      box-shadow var(--dur-normal) var(--ease-out-quart),
+      border-color var(--dur-normal) var(--ease-out-quart),
+      background-color var(--dur-normal) var(--ease-out-quart);
+  }
+
+  .surface-interactive:hover {
+    border-color: var(--color-line-strong);
+    box-shadow: var(--shadow-e2);
+  }
+
+  /* ---------------------------------------------------------- 书签 */
+  /* 品牌记忆点：从卡片左缘探出的一小截暖色标签 —— "我帮你夹在这里了" */
+  .bookmark {
+    position: relative;
+  }
+
+  .bookmark::before {
+    content: '';
+    position: absolute;
+    left: -1px;
+    top: 16px;
+    width: 3px;
+    height: 26px;
+    background-color: var(--color-sienna);
+    border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+    transition: height var(--dur-normal) var(--ease-out-quart);
+  }
+
+  .bookmark:hover::before {
+    height: 40px;
+  }
+
+  /* ---------------------------------------------------------- 按钮 */
+  /* 主按钮：墨绿实底，带一层很轻的外发光。
+     全场只有一个主要行动，所以它必须是页面上"最亮"的东西。 */
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    background-color: var(--color-moss);
+    color: #fff;
+    font-weight: 500;
+    border: none;
+    border-radius: var(--radius-md);
+    padding: 0.5625rem 1.125rem;
+    box-shadow:
+      var(--shadow-e1),
+      0 0 0 0 rgb(27 107 84 / 0);
+    transition:
+      background-color var(--dur-fast) var(--ease-out-quart),
+      box-shadow var(--dur-normal) var(--ease-out-quart),
+      transform var(--dur-fast) var(--ease-out-quart);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background-color: var(--color-moss-ink);
+    box-shadow:
+      var(--shadow-e2),
+      0 0 20px -4px rgb(27 107 84 / 0.4);
+  }
+
+  .btn-primary:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: var(--shadow-e0);
+  }
+
+  .btn-primary:disabled {
+    background-color: var(--color-line-strong);
+    color: var(--color-surface-1);
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  /* 次级按钮：纸底描边 */
+  .btn-quiet {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    background-color: transparent;
+    color: var(--color-ink-2);
+    border: 1px solid var(--color-line-strong);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 1rem;
+    transition:
+      background-color var(--dur-fast) var(--ease-out-quart),
+      border-color var(--dur-fast) var(--ease-out-quart),
+      color var(--dur-fast) var(--ease-out-quart);
+  }
+
+  .btn-quiet:hover:not(:disabled) {
+    background-color: var(--color-surface-2);
+    border-color: var(--color-ink-4);
+    color: var(--color-ink-1);
+  }
+
+  .btn-quiet:disabled {
+    color: var(--color-ink-4);
+    cursor: not-allowed;
+  }
+
+  /* 幽灵按钮：无边框，用于图标与密集工具条 */
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1-5);
+    background-color: transparent;
+    color: var(--color-ink-3);
+    border: none;
+    border-radius: var(--radius-md);
+    padding: 0.4375rem 0.625rem;
+    transition:
+      background-color var(--dur-fast) var(--ease-out-quart),
+      color var(--dur-fast) var(--ease-out-quart);
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    background-color: var(--color-paper-sunken);
+    color: var(--color-ink-1);
+  }
+
+  /* ---------------------------------------------------------- 输入 */
+  /* 内槽感：像纸上的横线。聚焦时给主色描边 + 一圈很轻的光。 */
+  .field {
+    width: 100%;
+    background-color: var(--color-surface-1);
+    border: 1px solid var(--color-line-strong);
+    border-radius: var(--radius-md);
+    padding: 0.5625rem 0.75rem;
+    color: var(--color-ink-1);
+    transition:
+      border-color var(--dur-fast) var(--ease-out-quart),
+      box-shadow var(--dur-normal) var(--ease-out-quart),
+      background-color var(--dur-fast) var(--ease-out-quart);
+  }
+
+  .field::placeholder {
+    color: var(--color-ink-4);
+  }
+
+  .field:hover:not(:disabled):not(:focus) {
+    border-color: var(--color-ink-4);
+  }
+
+  .field:focus {
+    outline: none;
+    border-color: var(--color-moss);
+    box-shadow: var(--glow-moss);
+  }
+
+  .field[aria-invalid='true'] {
+    border-color: var(--color-brick);
+  }
+
+  .field[aria-invalid='true']:focus {
+    box-shadow:
+      0 0 0 1px rgb(168 58 43 / 0.2),
+      0 0 0 6px rgb(168 58 43 / 0.08);
+  }
+
+  /* ------------------------------------------------------ 排版语义 */
+  /* 元信息标签：小、克制、不抢注意力 */
+  .meta {
+    font-size: var(--text-2xs);
+    color: var(--color-ink-3);
+    letter-spacing: 0.02em;
+  }
+
+  /* 助教说的话：衬线、较大字号、行距松 —— 像书上的注解 */
+  .tutor-voice {
+    font-family: var(--font-serif);
+    font-size: var(--text-base);
+    line-height: 1.9;
+    color: var(--color-ink-1);
+  }
+
+  /* 学习者说的话 */
+  .learner-voice {
+    font-size: var(--text-sm);
+    line-height: 1.75;
+    color: var(--color-ink-2);
+  }
+
+  /* 展示级标题 */
+  .display {
+    font-family: var(--font-serif);
+    font-size: var(--text-display);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    color: var(--color-ink-1);
+    font-weight: 600;
+  }
+
+  /* ------------------------------------------------------ 骨架屏 */
+  .skeleton {
+    background-color: var(--color-paper-sunken);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgb(255 255 255 / 0.5) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    background-repeat: no-repeat;
+    border-radius: var(--radius-sm);
+    animation: var(--animate-shimmer);
+  }
+
+  [data-theme='dark'] .skeleton {
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgb(255 255 255 / 0.06) 50%,
+      transparent 100%
+    );
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   降级：尊重 prefers-reduced-motion
+   ══════════════════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

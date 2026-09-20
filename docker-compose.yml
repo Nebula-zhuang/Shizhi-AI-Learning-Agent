@@ -1,0 +1,74 @@
+# =============================================================================
+# Learning Buddy · 本地编排
+# =============================================================================
+# P0 说明：
+#   本机已安装并运行 MySQL 9.6（监听 3306），且本机没有 Docker，
+#   因此 P0 阶段后端与前端建议直接用本地进程启动，本文件保留供以下场景使用：
+#     1. 换一台干净的机器，需要一键拉起 MySQL；
+#     2. 后续阶段把 api / web 也容器化。
+#
+# 用法：
+#   docker compose up -d mysql        # 只起数据库
+#   docker compose --profile full up -d   # 起全部（需要先构建镜像）
+# =============================================================================
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: learning-buddy-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-change-me-in-env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-learning_buddy}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=caching_sha2_password
+    ports:
+      # 避免与本机已有 MySQL 的 3306 冲突，映射到 3307
+      - "${MYSQL_HOST_PORT:-3307}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_PASSWORD:-change-me-in-env}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  api:
+    profiles: ["full"]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: learning-buddy-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      UPLOAD_DIR: /app/data/uploads
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  web:
+    profiles: ["full"]
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: learning-buddy-web
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  mysql_data:

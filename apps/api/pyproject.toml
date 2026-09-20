@@ -1,0 +1,21 @@
+[project]
+name = "learning-buddy-api"
+version = "0.1.0"
+description = "Learning Buddy 后端 —— 多模态学习智能体"
+requires-python = ">=3.11"
+
+# 依赖统一维护在 requirements.txt，此处不重复声明，避免两处漂移。
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

@@ -1,0 +1,18 @@
+/**
+ * 全局样式入口。
+ *
+ * 顺序有讲究：**先引 Tailwind，再引设计令牌**。
+ * Tailwind 的入口会声明 `theme / base / components / utilities` 四个图层，
+ * 令牌文件里的 `@layer base` 与 `@layer components` 必须在那之后才有效。
+ *
+ * 所有组件样式都通过令牌 + Tailwind 工具类表达，这里不再堆业务样式。
+ */
+
+@import 'tailwindcss';
+@import './styles/theme.css';
+
+html,
+body,
+#root {
+  height: 100%;
+}

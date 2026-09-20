@@ -1,0 +1,129 @@
+/* Markdown 渲染样式。
+   单独成文件而不是塞进 index.css：保持 P0 的全局样式文件不被改动。
+   Tailwind 未安装 typography 插件，这里手写最小必要样式。 */
+
+.md-body {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1e293b;
+  word-break: break-word;
+}
+
+.md-body > *:first-child {
+  margin-top: 0;
+}
+
+.md-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  margin: 14px 0 6px;
+  font-weight: 500;
+  color: #0f172a;
+}
+
+.md-body h1 {
+  font-size: 15px;
+}
+
+.md-body h2 {
+  font-size: 14px;
+}
+
+.md-body h3,
+.md-body h4 {
+  font-size: 13px;
+}
+
+.md-body p {
+  margin: 8px 0;
+}
+
+.md-body ul,
+.md-body ol {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.md-body ul {
+  list-style: disc;
+}
+
+.md-body ol {
+  list-style: decimal;
+}
+
+.md-body li {
+  margin: 3px 0;
+}
+
+.md-body strong {
+  font-weight: 500;
+  color: #0f172a;
+}
+
+.md-body code {
+  background-color: #f1f5f9;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.md-body pre {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.md-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+}
+
+.md-body blockquote {
+  margin: 10px 0;
+  padding: 4px 0 4px 12px;
+  border-left: 2px solid #cbd5e1;
+  color: #475569;
+}
+
+.md-body table {
+  margin: 10px 0;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.md-body th,
+.md-body td {
+  border: 1px solid #e2e8f0;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.md-body th {
+  background-color: #f8fafc;
+  font-weight: 500;
+  color: #0f172a;
+}
+
+.md-body a {
+  color: #4f46e5;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md-body hr {
+  margin: 14px 0;
+  border: none;
+  border-top: 1px solid #e2e8f0;
+}
