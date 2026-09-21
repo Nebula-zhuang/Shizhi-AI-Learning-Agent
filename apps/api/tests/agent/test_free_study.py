@@ -20,6 +20,7 @@ import pytest
 from app.agent import free_study
 from app.agent.runtime_loop import LoopDecision, LoopObservation
 from app.agent.tools.specs import ToolResult
+from app.core.config import settings
 from app.search.provider import MockWebSearchProvider
 
 
@@ -351,3 +352,105 @@ def test_registry_lists_all_tools_regardless_of_availability() -> None:
     registry = free_study.build_registry()
     assert len(registry.names()) == 5
     assert len(registry.available_names()) <= 5
+
+
+# =========================================================================== #
+# 五、DECIDE 的输出预算：别忘了这里曾经写死 400
+#
+# 背景（2B1 回归暴露的）：
+#   这里原本是 `max_tokens=400`，而 `_parse_decision` 用 `thought[:300]` ——
+#   中文 300 字本身就要 200~400 tokens，再加 JSON 外壳，400 根本不够。
+#   两个数字本来就矛盾，只是模型一直没写那么长。
+#   **2B1 把预算告诉模型后，它开始逐条权衡剩余次数/时间，thought 涨到 300+ 字**，
+#   于是输出在 thought 中途被硬截断 → 没有闭合 `}` → 解析失败 →
+#   重试参数一模一样、再次同样截断 → 降级为直接回答，**丢掉多步工具编排**。
+#
+# 这一组守的就是"别再让上限和允许的 thought 长度互相打架"。
+# =========================================================================== #
+@pytest.mark.asyncio
+async def test_decide_call_uses_the_project_max_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DECIDE 的输出上限必须取 `settings.llm_max_tokens`，**不许再写死数字**。
+
+    刻意断言"等于设置里的值"而不是"等于 1024"：
+    1024 是一个可被 `.env` 覆盖的配置，不是业务常量。
+    写死它会让将来调配置的人莫名其妙地踩到这条测试。
+    """
+    captured: dict = {}
+
+    async def fake_chat_json(messages, **kwargs):
+        captured.update(kwargs)
+        captured["messages"] = messages
+        return {"thought": "够了", "final": True}
+
+    monkeypatch.setattr(free_study.llm_gateway, "chat_json", fake_chat_json)
+
+    decider = free_study._make_decider(images=(), document_ids=())
+    decision = await decider(LoopObservation(question="什么是 JVM？"), [])
+
+    assert decision.final is True
+    assert "max_tokens" in captured, "决策调用没有传 max_tokens"
+    assert captured["max_tokens"] == settings.llm_max_tokens, (
+        f"决策的输出上限应取 settings.llm_max_tokens="
+        f"{settings.llm_max_tokens}，实际 {captured['max_tokens']}"
+    )
+
+
+def test_loop_decide_prompt_bounds_the_thought_length() -> None:
+    """提示词里必须给 `thought` 一个明确的字数上限。
+
+    为什么必须有：**输出长度是生成属性，运行时无从拦截** ——
+    代码能限制工具、
+    能限制步数，唯独没法阻止模型把理由写长。提示词是唯一的杠杆。
+
+    为什么是 60 字：Tutor 的 `tutor_decision.md` 对 `reason` 用的就是这个数，
+    而 Tutor 同样是 `max_tokens` 有限的决策调用、却从没出现过截断。
+    照抄一个**已被生产验证过**的约束，比重新拍一个数字稳。
+    """
+    import re
+    from pathlib import Path
+
+    prompt = Path(free_study.__file__).parent / "prompts" / "loop_decide.md"
+    text = prompt.read_text(encoding="utf-8")
+
+    match = re.search(r"`?thought`?[^\n]{0,30}?不超过\s*(\d+)\s*字", text)
+    assert match, "输出格式里必须给 thought 一个明确的字数上限（形如「thought 不超过 N 字」）"
+
+    limit = int(match.group(1))
+    assert limit <= 100, f"上限 {limit} 字太大，起不到约束作用"
+    # 与 Tutor 对齐 —— 两边不一致时，读代码的人会不知道哪个才是规矩
+    assert limit == 60, f"应当与 Tutor 的 reason 约束一致（60 字），实际 {limit}"
+
+
+def test_extract_json_cannot_recover_a_truncated_decision() -> None:
+    """**记录能力边界**：`extract_json` 救不回被截断的 JSON。
+
+    这条不是在测 bug，而是在**把事实钉下来**，免得将来有人以为
+    "反正解析器有兜底" 就敢把输出上限调小 —— 它的兜底是
+    "找第一个 `{` 到**最后一个** `}`"，而截断的输出**根本没有闭合 `}`**。
+
+    真正的防线是**不让它被截断**（上限够大 + 提示词约束 thought 长度），
+    而不是指望事后补救。**本轮刻意没有改解析器。**
+    """
+    from app.core.llm import extract_json
+
+    truncated = (
+        '{"thought": "用户要求三件事：①用资料解释进程与线程区别 → 已有充分资料'
+        "（片段[1][2]已覆盖定义、资源分配/调度单位、共享/开销/通信/同步等核心区别），可直接回答，无需调工具；②联网查"
+    )
+    with pytest.raises(ValueError):
+        extract_json(truncated)
+
+    # 另一种截断形态：字段值都完整、只是最后的括号没闭上 —— 同样救不回来
+    half_closed = '{"thought": "够了", "tool": "web_search", "arguments": {"query": "x"'
+    with pytest.raises(ValueError):
+        extract_json(half_closed)
+
+    # 对照：**格式污染**（而非截断）是能救的 —— 兜底正是为它而写
+    assert extract_json('```json\n{"thought": "够了", "final": true}\n```') == {
+        "thought": "够了",
+        "final": True,
+    }
+    assert extract_json('好的，我的判断是：{"thought": "够了", "final": true} 以上。') == {
+        "thought": "够了",
+        "final": True,
+    }

@@ -318,7 +318,22 @@ def _make_decider(*, images: Sequence[str], document_ids: Sequence[int]):
         try:
             raw = await llm_gateway.chat_json(
                 [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-                max_tokens=400,
+                # ⚠️ 决策的输出上限**必须**放得下 `_parse_decision` 允许的 thought 长度。
+                #
+                # 这里曾经写死 400，而 `_parse_decision` 用 `thought[:300]` ——
+                # 中文约 1~1.5 token/字，**300 字本身就要 200~400 tokens**，
+                # 再加 JSON 外壳（thought/tool/arguments），400 根本不够。
+                # 两个数字本来就互相矛盾，只是当时模型写不到那么长才没暴露。
+                #
+                # 2B1 把预算告诉模型后，thought 从 ~150 字涨到 300+ 字：
+                # 输出在 thought 中途被硬截断 → 没有闭合的 `}` →
+                # `extract_json` 的兜底（找**最后一个** `}`）也救不回来 →
+                # 重试**参数一模一样**、再次同样截断 → 最终降级为直接回答，
+                # **丢掉本该发生的多步工具编排**。
+                #
+                # 改用项目既有的 `settings.llm_max_tokens`（默认 1024）：
+                # 不新增配置项，且与其它 LLM 调用的口径一致。
+                max_tokens=settings.llm_max_tokens,
                 mock_builder=mock_builder,
             )
         except Exception as exc:  # noqa: BLE001
