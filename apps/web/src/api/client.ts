@@ -76,6 +76,11 @@ async function extractError(res: Response): Promise<string> {
 /**
  * 发起流式对话。
  * 失败与中断都通过 handlers.onError 上报，不抛异常。
+ *
+ * ⚠️ **必须带 `credentials: 'include'`** —— 这个接口已要求登录
+ * （2026-09-21 安全审计后闭合的"未授权 LLM 代理"），
+ * 而会话在 httpOnly cookie 里。漏了这一行，**已登录用户也会拿到 401**，
+ * 表现为"开发者 → 接口调试"页莫名其妙不可用。
  */
 export async function streamChat(
   messages: ChatMessage[],
@@ -86,6 +91,8 @@ export async function streamChat(
   try {
     res = await fetch(url('/api/chat/stream'), {
       method: 'POST',
+      // 会话在 httpOnly cookie 里，不带凭据就是匿名身份
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',

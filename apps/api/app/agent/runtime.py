@@ -307,6 +307,23 @@ class TutorRuntime:
                 self._stage_hook(label)
 
     # ------------------------------------------------------------ 对外入口
+    def _load_owned_session(self, session_id: int) -> Session:
+        """按 id 加载会话，**并校验它属于当前 learner**。
+
+        ⚠️ 这里的校验不能省：`session_id` 来自请求体，是用户可控的。
+        少了它，任何人传别人的 id 就能读写他人会话 ——
+        读得到完整对话与作答，写得了消息进别人的对话记录。
+
+        不存在与不属于**都返回 404** —— 403 等于确认"这个 id 存在"，
+        那就成了一个用来枚举他人会话的接口。
+        """
+        session = self.db.get(Session, session_id)
+        if session is None or session.learner_id != self.learner_id:
+            raise TutorError(
+                f"会话 {session_id} 不存在。", status_code=404, code="session_not_found"
+            )
+        return session
+
     async def start(
         self,
         *,
@@ -322,11 +339,7 @@ class TutorRuntime:
             )
 
         if session_id is not None:
-            session = self.db.get(Session, session_id)
-            if session is None:
-                raise TutorError(
-                    f"会话 {session_id} 不存在。", status_code=404, code="session_not_found"
-                )
+            session = self._load_owned_session(session_id)
         else:
             session = Session(
                 learner_id=self.learner_id,
@@ -344,9 +357,7 @@ class TutorRuntime:
 
     async def submit_answer(self, *, session_id: int, user_answer: str) -> TurnResult:
         """提交一次作答：评估 → 更新状态 → 决策下一动作。"""
-        session = self.db.get(Session, session_id)
-        if session is None:
-            raise TutorError(f"会话 {session_id} 不存在。", status_code=404, code="session_not_found")
+        session = self._load_owned_session(session_id)
         if session.knowledge_point_id is None:
             raise TutorError("会话没有关联知识点。", status_code=409, code="session_without_kp")
 

@@ -269,14 +269,24 @@ async def tutor_start_stream(
 @router.get(
     "/sessions/{session_id}", response_model=TutorSessionResponse, summary="会话全貌"
 )
-def tutor_session(session_id: int, db: Session = Depends(get_db)) -> TutorSessionResponse:
+def tutor_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    learner_id: str = Depends(current_learner_id),
+) -> TutorSessionResponse:
     """消息 + 每轮决策 + 每次评估。
 
     `action_sequence` 是从助手消息里提取的动作序列 —— 演示时一眼就能看出
     "教学策略确实随状态在变"，而不是每轮随机。
+
+    ⚠️ **必须按 learner 校验归属。** 这个接口返回的是完整对话内容、
+    学习者的作答与评分 —— 曾经它只依赖 `get_db`、按主键直取会话，
+    于是任何人（甚至未登录）枚举 `session_id` 就能读到别人的会话。
     """
     session = db.get(TutorSession, session_id)
-    if session is None:
+    # 不存在与不属于当前 learner **都返回 404** ——
+    # 403 等于确认"这个 id 确实存在"，那就是一个用来枚举他人会话的接口。
+    if session is None or session.learner_id != learner_id:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在。")
 
     messages = list(
