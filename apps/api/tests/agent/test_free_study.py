@@ -454,3 +454,141 @@ def test_extract_json_cannot_recover_a_truncated_decision() -> None:
         "thought": "够了",
         "final": True,
     }
+
+
+# =========================================================================== #
+# 六、图片规则：从"无条件第一步"收敛为"按需优先 + 失败可放弃"
+#
+# 背景（2B2）：原来的措辞是「有图片时**第一步必须**调用看图工具」。
+# 它带来两个问题（都实测过）：
+#   ① 用户只是顺带传了图、问题跟图无关时，也被迫先花十几秒看图；
+#   ② `image_analysis` 失败后，模型为了满足这条"必须"而无条件重试，
+#      把预算烧在同一个坑里（它和"失败过不要原样重试"冲突，且"必须"会赢）。
+#
+# 收敛后要保住的是**当初那条规则存在的真实理由**：
+# 模型曾经自己发明 `extract_text_from_image` 这个不存在的工具名，
+# 所以"用哪个名字"必须写死；但"第几步"不该被规定。
+#
+# ⚠️ 断言打在**真实渲染出的提示词**上，而不是 grep 源码 ——
+# 源码里有一段注释在讲"为什么删掉'必须第一步'"，grep 会误伤。
+# =========================================================================== #
+def _prompt_file() -> str:
+    from pathlib import Path
+
+    return (Path(free_study.__file__).parent / "prompts" / "loop_decide.md").read_text(
+        encoding="utf-8"
+    )
+
+
+async def _render_decide_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    has_image: bool = True,
+    failed_tools: tuple[str, ...] = (),
+) -> str:
+    """跑一次 decider，把真正发给模型的提示词抓出来。"""
+    captured: dict = {}
+
+    async def fake_chat_json(messages, **kwargs):
+        captured["messages"] = messages
+        return {"thought": "够了", "final": True}
+
+    monkeypatch.setattr(free_study.llm_gateway, "chat_json", fake_chat_json)
+    # 让"支持视觉"这件事确定下来（否则 .env 一变，提示词就走另一个分支）
+    monkeypatch.setattr(settings, "llm_supports_vision", True, raising=False)
+
+    decider = free_study._make_decider(
+        images=("fake.png",) if has_image else (), document_ids=()
+    )
+    observation = LoopObservation(question="解释一下这张图")
+    observation.failed_tools.extend(failed_tools)
+    await decider(observation, [])
+
+    assert captured.get("messages"), "decider 没有调用模型"
+    return "\n".join(str(m.get("content") or "") for m in captured["messages"])
+
+
+@pytest.mark.asyncio
+async def test_decide_prompt_drops_the_unconditional_first_step_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """d. 提示词不得再出现"第一步必须看图"这类**无条件排序**措辞。"""
+    prompt = await _render_decide_prompt(monkeypatch)
+
+    for banned in ("第一步必须", "必须第一步", "必须先看"):
+        assert banned not in prompt, f"仍有无条件排序措辞：{banned!r}"
+
+    # 静态模板也要干净（它不含那种"解释为什么删掉"的注释，可以直接查）
+    assert "第一步必须" not in _prompt_file(), "loop_decide.md 里还留着'第一步必须'"
+
+
+@pytest.mark.asyncio
+async def test_decide_prompt_keeps_the_exact_tool_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """e. 合法工具名必须**明确出现** —— 这是原规则真正要防的事。
+
+    实测踩过：只写"附了 1 张图片"时模型会自己发明
+    `extract_text_from_image`，调用失败后回一句"我看不到图"。
+    """
+    prompt = await _render_decide_prompt(monkeypatch)
+
+    assert "image_analysis" in prompt, "必须点名 image_analysis，否则模型会自己编工具名"
+    assert "不要自己编" in prompt, "要点明不许自造工具名"
+    assert "image_analysis" in _prompt_file()
+
+
+@pytest.mark.asyncio
+async def test_decide_prompt_lets_the_model_give_up_after_image_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f. `image_analysis` 失败后必须给出**退路**，而不是让它无脑重试。"""
+    prompt = await _render_decide_prompt(monkeypatch, failed_tools=("image_analysis",))
+
+    assert "已经失败过" in prompt
+    assert "原样" in prompt, "要明确说'不要原样再调一次'"
+    assert "看不了" in prompt, "要给出'如实说看不了'这条退路"
+
+    # 静态模板里同样要有这条冲突求解（与 free_study 的动态注入配套）
+    template = _prompt_file()
+    assert "失败之后" in template and "原样" in template
+
+
+@pytest.mark.asyncio
+async def test_image_prompt_only_fires_when_there_really_is_an_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没带图时不该出现**动态的"附了图片"段** —— 否则又成了一条"无条件规则"。
+
+    ⚠️ 只断言**动态段特有的措辞**：静态模板里本来就一直有规则 ①②
+    以及"已经失败过的工具不要原样重试"（那讲的是通用情况），
+    拿这些词去断言必然误伤。
+    """
+    prompt = await _render_decide_prompt(monkeypatch, has_image=False)
+
+    assert "附了" not in prompt, "没带图却出现了'附了 N 张图片'"
+    assert "不要为了满足" not in prompt, "没带图却出现了图片专用的失败退路段"
+
+    # 对照：带图时这两段都必须在
+    with_image = await _render_decide_prompt(monkeypatch)
+    assert "附了" in with_image and "image_analysis" in with_image
+    with_failure = await _render_decide_prompt(monkeypatch, failed_tools=("image_analysis",))
+    assert "不要为了满足" in with_failure
+
+
+def test_quick_route_still_sends_attachments_into_the_loop() -> None:
+    """g. `quick_route(has_attachments=True)` 的行为**不变** —— 图片仍必须进循环。
+
+    这是 2B2 的边界：摘掉的是图片的"资料"身份，
+    不是它的"附件"身份 —— 看图能力一点都不能少。
+    """
+    assert (
+        free_study.quick_route(
+            "这张图片是什么意思？", has_attachments=True, kb_size=0, web_available=True
+        )
+        is None
+    )
+    # 对照：没有附件、也没有资料指向时，仍走快通道
+    assert free_study.quick_route(
+        "什么是 JVM？", has_attachments=False, kb_size=0, web_available=True
+    )

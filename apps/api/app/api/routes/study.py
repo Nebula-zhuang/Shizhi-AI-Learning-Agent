@@ -239,6 +239,35 @@ async def ask(
             # 单张图读不出来不该让整轮失败 —— 记下来，让这一轮退回纯文本
             logger.warning("附件 %s 的图片路径无法解析：%s", doc.id, exc)
 
+    # ── 图片文档**不当作"可检索资料"**递给 Agent。
+    #
+    # 上传的图片在库里就是一条 `Document`，于是会被 `scoped` 顺带带进
+    # `document_ids`。后果实测过：提示词里会同时出现
+    # 「附了 1 张图片」和「用户指定了 1 份资料（document_ids=[...]）」，
+    # 而**没有任何字段说明那份"资料"就是这张图** ——
+    # Agent 于是以为除了图之外还有别的材料，转而去调 `retrieve_knowledge`。
+    #
+    # 而图片文档的 chunk 里**只有文件名**（实测 `code.png` 这种），
+    # 检索它不可能拿回任何图片内容 —— 那一次调用是**纯浪费**。
+    #
+    # 图片内容已经由上面的 `images` 交给 `image_analysis`，
+    # 所以这里把它摘出去**不损失任何能力**；
+    # 真实文档（PDF / DOCX / PPTX / TXT / MD …）照旧保留。
+    image_doc_ids = {
+        doc.id for doc in attachments if study_service.is_image_extension(doc.file_name)
+    }
+    if not payload.document_ids:
+        # 没显式传 ids 时 `attachments` 是空的 —— 得把 scoped 这批查一遍
+        # 才认得出其中哪些是图片。（`scoped` 取自 owned_ids，不会触发越权拒绝。）
+        image_doc_ids |= {
+            doc.id
+            for doc in study_service.require_attachments(
+                db, learner_id=learner_id, document_ids=scoped
+            )
+            if study_service.is_image_extension(doc.file_name)
+        }
+    material_ids = [x for x in scoped if x not in image_doc_ids]
+
     study_service.append_message(
         db,
         conversation=conversation,
@@ -272,7 +301,10 @@ async def ask(
             async for event in free_study.stream_turn(
                 question=question,
                 history=history,
-                document_ids=scoped or None,
+                # ⚠️ 用 `material_ids` 而不是 `scoped` —— 图片文档已被摘掉，
+                # 否则 Agent 会把"图"误当成另一份可检索资料（见上面的说明）。
+                # 全都是图片时这里为空，提示词就不会再出现"指定了 N 份资料"。
+                document_ids=material_ids or None,
                 # 图片路径会**绑定进 image_analysis 工具**：
                 # 模型只需要说"我想知道什么"，不需要知道图在哪
                 images=image_paths,

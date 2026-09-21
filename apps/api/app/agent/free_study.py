@@ -261,14 +261,31 @@ def _make_decider(*, images: Sequence[str], document_ids: Sequence[int]):
 
         attachment_lines: list[str] = []
         if images:
-            # **不只陈述事实，还给出下一步。**
-            # 实测只写"附了 1 张图片"时，模型会自己发明一个工具名
-            # （`extract_text_from_image`）而不用清单里的 `image_analysis`，
-            # 然后调用失败、回一句"我看不到图"。
+            # **必须点名工具名，但不再规定"第几步"。**
+            #
+            # 点名是**实测逼出来的**：只写"附了 1 张图片"时，模型会自己发明一个
+            # 工具名（`extract_text_from_image`）而不用清单里的 `image_analysis`，
+            # 然后调用失败、回一句"我看不到图"。所以"用哪个名字"必须写清楚。
+            #
+            # 但**"必须第一步"是多余的** —— 它带来过两个问题：
+            #   ① 用户只是顺带问了句别的，也得先花十几二十秒看图；
+            #   ② `image_analysis` 失败后，模型为了满足这条"必须"而无条件重试，
+            #      把预算烧在同一个坑里（详见 `loop_decide.md` 的规则②）。
+            # 现在改成"**按问题需要优先观察图片**"：该看就看，不依赖就先做别的。
             if settings.llm_supports_vision:
                 attachment_lines.append(
-                    f"**用户这一轮附了 {len(images)} 张图片 —— 第一步必须用 `image_analysis` 看图。**"
+                    f"**用户这一轮附了 {len(images)} 张图片 —— 要看就用清单里的 "
+                    f"`image_analysis`（不要自己编工具名）。**\n"
+                    "如果回答依赖图片内容，就优先看图；如果不依赖，可以先做别的事。"
                 )
+                # 已经失败过 → 必须给出退路，否则"看图"就成了一条死命令。
+                if "image_analysis" in observation.failed_tools:
+                    attachment_lines.append(
+                        "⚠️ 上一轮 `image_analysis` 已经失败过。"
+                        "**不要为了满足'看图'再原样调一次** —— 重新判断："
+                        "换个更具体的问法是否真能拿到新信息、要不要改用别的能力、"
+                        "还是如实告诉用户这次看不了、请他把图里的内容贴出来。"
+                    )
             else:
                 # 看不了图时**不能让它去调一个不可用的工具** ——
                 # 那只会白转一轮，最后还是得说看不了。
