@@ -130,6 +130,41 @@ class LoopStep:
         }
 
 
+@dataclass(frozen=True)
+class BudgetSnapshot:
+    """本轮工具预算的**只读快照**，给决策模型看的。
+
+    为什么要有它：模型此前完全**看不见**自己还剩多少预算。
+    实测后果是它把额度全花在一个注定失败的看图调用上（先等 20 秒、
+    又重试 4.8 秒），其余三件事一件都没做 —— 它并不是判断错了，
+    而是**缺信息**。把剩余量告诉它，规划就成了它自己的事。
+
+    ⚠️ 它只是**告知**，不是预算本体：真正的扣减在 `ToolBudget` 里，
+    模型既改不了它，也不可能靠声明去突破。每次 DECIDE 前由循环重新生成，
+    所以模型看到的**永远是最新值**，不是进入循环时的那个快照。
+    """
+
+    #: 还剩几次工具调用
+    remaining_calls: int
+    #: 还剩多少秒
+    remaining_seconds: float
+    #: 本轮上限（让模型知道"剩下的是多是少"，而不只是一个孤立的数字）
+    max_calls: int
+    max_seconds: float
+    #: 低于这个剩余时间就不值得再发起调用（= 循环的 useful floor）
+    useful_floor_seconds: float
+
+    @property
+    def can_call_tool(self) -> bool:
+        """现在还能不能发起一次有意义的工具调用。
+
+        两个条件都要满足：次数还有，且时间够做完一件事。
+        后半条与 `AgentLoop.out_of_time()` 用的是**同一个门槛** ——
+        否则会出现"提示词说还能调、实际一调就被拒"的自相矛盾。
+        """
+        return self.remaining_calls > 0 and self.remaining_seconds >= self.useful_floor_seconds
+
+
 @dataclass
 class LoopObservation:
     """当前掌握的全部信息。**每轮决策看到的都是它的最新快照。**"""
@@ -137,6 +172,9 @@ class LoopObservation:
     question: str
     #: 历史对话（不含本轮）
     history: list[dict[str, str]] = field(default_factory=list)
+    #: 本轮预算的最新快照。由循环在**每次 DECIDE 之前**刷新（见 `_budget_snapshot`）。
+    #: 为 None 表示还没刷新过（首次进入循环前），此时提示词不显示预算段。
+    budget: BudgetSnapshot | None = None
     #: 本轮已经拿到工具结果，按发生顺序
     results: list[ToolResult] = field(default_factory=list)
     #: 本轮附带的图片（多模态）
@@ -250,6 +288,21 @@ class AgentLoop:
             """
             return min(MIN_USEFUL_TOOL_SECONDS, self.limits.total_seconds / 2)
 
+        def budget_snapshot() -> BudgetSnapshot:
+            """取**此刻**的预算快照。
+
+            ⚠️ 每次 DECIDE 前都要重新调一次，不要把它存成局部变量复用 ——
+            那样第二次决策看到的还是第一次的数字，模型会照着过期信息规划。
+            """
+            budget = self.runner.budget
+            return BudgetSnapshot(
+                remaining_calls=budget.remaining_calls,
+                remaining_seconds=budget.remaining_seconds,
+                max_calls=budget.max_calls,
+                max_seconds=budget.max_seconds,
+                useful_floor_seconds=useful_floor(),
+            )
+
         def out_of_time() -> bool:
             """整轮时间是否已经不够继续。
 
@@ -285,6 +338,13 @@ class AgentLoop:
                 break
 
             # ── OBSERVE ＋ DECIDE
+            #
+            # ⚠️ **先把此刻的预算写进观察对象，再让模型决策。**
+            # 决策必须基于最新的剩余量：工具跑过、时间流过、配额扣减过之后，
+            # 上一轮那个数字就过期了。放在这里（而不是循环外）也保证了
+            # "每一次重新 DECIDE 都刷新"是**结构性**的，不靠调用方自觉。
+            observation.budget = budget_snapshot()
+
             specs = self.registry.describe_for_llm()
             try:
                 decision = await self.decider(observation, specs)
@@ -574,3 +634,50 @@ def format_observations(observation: LoopObservation) -> str:
                 "如果任务需要那个信息，可以换个查询方式再试一次；否则就基于已有信息回答。）"
             )
     return "\n\n".join(b for b in blocks if b)
+
+
+def format_budget(budget: BudgetSnapshot | None) -> str:
+    """把预算快照渲染成给模型看的一段话。
+
+    ## 三条必须写清的事
+
+    1. **这是只读的当前状态** —— 模型改不了、也突破不了。
+       不写清楚，模型可能会试图"申请更多额度"（编一个工具名或参数），白费一步。
+    2. **剩余次数为 0 → 明确说不能再调工具了。** 否则它会继续输出工具调用，
+       然后被 Runtime 拒绝，白白浪费一步决策。
+    3. **剩余时间低于门槛 → 明确说该收尾了。** 同上，而且这一条要与
+       `AgentLoop.out_of_time()` 用**同一个门槛**，不能自相矛盾。
+
+    ⚠️ 措辞刻意是"**告知事实 + 给出后果**"，而不是"你必须收尾"。
+    判断仍然留给模型 —— 它可能还剩一次调用、但已经不需要用了，
+    那就该直接回答；这个判断不该被提示词替它做掉。
+    """
+    if budget is None:
+        return ""
+
+    seconds = max(0.0, budget.remaining_seconds)
+    lines = [
+        "## 本轮的 Runtime 预算（只读）",
+        "",
+        f"- 剩余工具调用：**{budget.remaining_calls} 次**（本轮上限 {budget.max_calls} 次）",
+        f"- 剩余时间：**约 {seconds:.0f} 秒**（本轮上限 {budget.max_seconds:.0f} 秒）",
+        "",
+        "这些数字是 Runtime 的当前状态，**只用来帮你决定下一步**："
+        "你不能修改、突破或重置它们，也不需要为它们做任何事。",
+    ]
+
+    if not budget.can_call_tool:
+        # 两种"没额度了"的成因分开说 —— 提示词里给的原因越具体，
+        # 模型越不容易再试一次（它知道试了也没用）。
+        if budget.remaining_calls <= 0:
+            reason = f"工具调用次数已经用完（上限 {budget.max_calls} 次）"
+        else:
+            reason = f"剩余时间不足 {budget.useful_floor_seconds:.0f} 秒，完成不了一次工具调用"
+        lines += [
+            "",
+            f"⚠️ **{reason} —— 现在不能再调用工具了。**",
+            "请直接基于已经拿到的信息生成最终回答；如果确实还差什么，"
+            "在回答里如实说明缺了什么。",
+        ]
+
+    return "\n".join(lines)

@@ -39,6 +39,7 @@ from app.agent.runtime_loop import (
     LoopDecision,
     LoopLimits,
     LoopObservation,
+    format_budget,
     format_observations,
 )
 from app.agent.tool_specs import register_all
@@ -307,6 +308,9 @@ def _make_decider(*, images: Sequence[str], document_ids: Sequence[int]):
                 "tools": tools_block,
                 "question": observation.question,
                 "attachments": attachments,
+                # 预算来自观察对象，而观察对象由循环在**每次 DECIDE 前**刷新 ——
+                # 所以这里读到的永远是最新值，不是第一次决策时的快照。
+                "budget": format_budget(observation.budget),
                 "observations": observations,
             },
         )

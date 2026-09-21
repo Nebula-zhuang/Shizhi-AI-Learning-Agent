@@ -23,6 +23,7 @@ import pytest
 from app.agent.runtime_loop import (
     MIN_USEFUL_TOOL_SECONDS,
     AgentLoop,
+    BudgetSnapshot,
     LoopDecision,
     LoopLimits,
     LoopObservation,
@@ -30,6 +31,7 @@ from app.agent.runtime_loop import (
     _describe_parameters,
     _missing_required,
     _summarize_arguments,
+    format_budget,
     format_observations,
 )
 from app.agent.tools.registry import ToolRunner
@@ -61,14 +63,20 @@ def _spec(
 
 
 class _Scripted:
-    """按剧本一步步给出决策。用完剧本后一直收尾。"""
+    """按剧本一步步给出决策。用完剧本后一直收尾。
+
+    顺带记下**每次**决策时观察对象里的预算快照 ——
+    "模型看到的是不是最新预算"只能从这里验证。
+    """
 
     def __init__(self, decisions: list[LoopDecision]) -> None:
         self._decisions = decisions
         self.calls = 0
+        self.seen_budgets: list[BudgetSnapshot | None] = []
 
     async def __call__(self, observation: LoopObservation, tools: list[dict]) -> LoopDecision:
         self.calls += 1
+        self.seen_budgets.append(observation.budget)
         if self.calls <= len(self._decisions):
             return self._decisions[self.calls - 1]
         return LoopDecision(thought="剧本用完了", final=True)
@@ -114,8 +122,9 @@ async def _run(
     async for event in loop.run(observation or LoopObservation(question="q")):
         if event.event == "done":
             result = event.data
-    # 附上决策函数被调了几次 —— "有没有空转"要靠它来判断
+    # 附上决策函数的痕迹 —— "有没有空转"看 calls，"看到的是不是最新预算"看 budgets
     result["decider_calls"] = decider.calls
+    result["seen_budgets"] = decider.seen_budgets
     return result
 
 
@@ -517,6 +526,181 @@ def test_image_analysis_declares_the_runner_default() -> None:
     assert spec.timeout == DEFAULT_TOOL_TIMEOUT, (
         f"应当等于 Runner 默认值 {DEFAULT_TOOL_TIMEOUT}，实际 {spec.timeout}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 二之五、决策可见性：模型要能看见自己还剩多少预算
+#
+# 背景：模型此前**完全看不见**剩余预算。实测后果是它把额度全烧在一个
+# 注定失败的看图调用上（先等 20 秒、又重试 4.8 秒），其余三件事一件没做 ——
+# 它不是判断错了，而是**缺信息**。
+#
+# ⚠️ 这一组只验证"信息有没有送到、是不是最新的"，
+# **不验证模型怎么用** —— 那是模型的事。提示词给事实，模型做判断。
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_first_decide_sees_the_initial_budget() -> None:
+    """第一次 DECIDE 就能看到**初始**剩余预算。"""
+    done = await _run(
+        decisions=[LoopDecision(final=True)],
+        max_calls=3,
+        max_seconds=30.0,
+    )
+
+    budgets = done["seen_budgets"]
+    assert len(budgets) == 1, f"应当只决策一次，实际 {len(budgets)} 次"
+    first = budgets[0]
+    assert first is not None, "第一次决策就该带上预算快照"
+    assert first.remaining_calls == 3
+    assert first.max_calls == 3
+    assert first.max_seconds == 30.0
+    # 刚进循环，剩余时间应当接近总预算
+    assert first.remaining_seconds > 29.0
+    assert first.can_call_tool is True
+
+
+@pytest.mark.asyncio
+async def test_second_decide_sees_the_updated_budget() -> None:
+    """**关键用例**：工具跑过一次之后，第二次 DECIDE 看到的必须是**扣减后**的预算。
+
+    如果循环只在进入时取一次快照，第二次决策看到的就还是 3 次 / 30 秒 ——
+    模型会照着过期信息规划。这条就是钉住"每次刷新"的。
+    """
+
+    async def slow(**kwargs) -> ToolResult:
+        await asyncio.sleep(0.25)
+        return ToolResult(ok=True, content="检索结果")
+
+    done = await _run(
+        decisions=[
+            LoopDecision(tool="web_search", arguments={"query": "q"}),
+            LoopDecision(final=True),
+        ],
+        specs=[_spec(handler=slow)],
+        max_calls=3,
+        max_seconds=30.0,
+    )
+
+    budgets = done["seen_budgets"]
+    assert len(budgets) == 2, f"应当决策两次，实际 {len(budgets)} 次"
+    first, second = budgets[0], budgets[1]
+    assert first is not None and second is not None
+
+    # 调用次数被真实扣减
+    assert first.remaining_calls == 3
+    assert second.remaining_calls == 2, "第二次决策看到的次数没有扣减 —— 快照是过期的"
+
+    # 时间也在走
+    assert second.remaining_seconds < first.remaining_seconds
+    assert second.max_calls == first.max_calls, "上限不该变，变的只是剩余量"
+
+
+@pytest.mark.asyncio
+async def test_budget_updates_on_every_decide_not_just_once() -> None:
+    """连调两次工具 → 三次决策看到的剩余次数应当是 3 → 2 → 1。"""
+
+    async def quick(**kwargs) -> ToolResult:
+        await asyncio.sleep(0.05)
+        return ToolResult(ok=True, content="结果")
+
+    done = await _run(
+        decisions=[
+            LoopDecision(tool="web_search", arguments={"query": "a"}),
+            LoopDecision(tool="web_search", arguments={"query": "b"}),
+            LoopDecision(final=True),
+        ],
+        specs=[_spec(handler=quick)],
+        max_calls=3,
+        max_seconds=30.0,
+    )
+
+    remaining = [b.remaining_calls for b in done["seen_budgets"] if b is not None]
+    assert remaining == [3, 2, 1], f"每次决策都该看到最新值，实际 {remaining}"
+
+
+def test_budget_text_says_stop_when_calls_are_exhausted() -> None:
+    """剩余**次数为 0** → 上下文必须明确说"不能再调用工具了"。"""
+    text = format_budget(
+        BudgetSnapshot(
+            remaining_calls=0,
+            remaining_seconds=20.0,
+            max_calls=3,
+            max_seconds=30.0,
+            useful_floor_seconds=MIN_USEFUL_TOOL_SECONDS,
+        )
+    )
+
+    assert "不能" in text and "调用工具" in text, f"没写清不能调用工具：{text}"
+    assert "0 次" in text
+    assert "次数已经用完" in text, "应当说明是次数用完了"
+    # 必须给出出路，否则模型只会卡住
+    assert "最终回答" in text
+
+
+def test_budget_text_says_stop_when_time_is_insufficient() -> None:
+    """剩余**时间低于 useful floor** → 上下文必须明确说该收尾了。"""
+    text = format_budget(
+        BudgetSnapshot(
+            remaining_calls=2,
+            remaining_seconds=1.0,  # < 2.0 的门槛
+            max_calls=3,
+            max_seconds=30.0,
+            useful_floor_seconds=MIN_USEFUL_TOOL_SECONDS,
+        )
+    )
+
+    assert "不能" in text and "调用工具" in text, f"没写清不能调用工具：{text}"
+    assert "时间不足" in text, "应当说明是时间不够了"
+    assert "最终回答" in text
+
+
+def test_budget_text_is_neutral_when_budget_is_healthy() -> None:
+    """预算还够时**不要**下"必须收尾"的判断 —— 那会把判断权从模型手里拿走。"""
+    text = format_budget(
+        BudgetSnapshot(
+            remaining_calls=2,
+            remaining_seconds=25.0,
+            max_calls=3,
+            max_seconds=30.0,
+            useful_floor_seconds=MIN_USEFUL_TOOL_SECONDS,
+        )
+    )
+
+    assert "不能再调用工具" not in text
+    assert "剩余工具调用" in text and "剩余时间" in text
+    # 要说明这是只读的、模型改不了
+    assert "不能修改" in text
+
+
+def test_budget_text_is_empty_without_a_snapshot() -> None:
+    """没有快照时**不输出空标题** —— 免得提示词里出现一段没有内容的"预算"。"""
+    assert format_budget(None) == ""
+
+
+def test_can_call_tool_uses_the_same_floor_as_the_loop() -> None:
+    """`can_call_tool` 与 `AgentLoop.out_of_time()` 必须是**同一个门槛**。
+
+    否则会出现"提示词说还能调、真调了却被拒"的自相矛盾 ——
+    那比不给信息更糟，模型会学着不信任提示词。
+    """
+    healthy = BudgetSnapshot(2, 10.0, 3, 30.0, MIN_USEFUL_TOOL_SECONDS)
+    no_calls = BudgetSnapshot(0, 10.0, 3, 30.0, MIN_USEFUL_TOOL_SECONDS)
+    low_time = BudgetSnapshot(2, 1.9, 3, 30.0, MIN_USEFUL_TOOL_SECONDS)
+
+    assert healthy.can_call_tool is True
+    assert no_calls.can_call_tool is False
+    assert low_time.can_call_tool is False
+
+
+def test_hard_limits_are_unchanged() -> None:
+    """**硬限制的数值不许被这次改动碰掉。**"""
+    limits = LoopLimits()
+    assert limits.max_steps == 6
+    assert limits.max_tool_calls == 3
+    assert limits.total_seconds == 30.0
+    assert limits.max_retry_per_tool == 2
+    # 门槛常量本身也不该被顺手调大
+    assert MIN_USEFUL_TOOL_SECONDS == 2.0
 
 
 # --------------------------------------------------------------------------- #

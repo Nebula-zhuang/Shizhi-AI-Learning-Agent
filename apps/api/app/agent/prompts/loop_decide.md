@@ -85,6 +85,8 @@
 
 {{attachments}}
 
+{{budget}}
+
 {{observations}}
 
 请决定下一步。
