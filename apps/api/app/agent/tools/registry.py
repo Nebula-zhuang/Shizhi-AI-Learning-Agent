@@ -166,6 +166,7 @@ class ToolRunner:
         /,
         *,
         counted: bool = True,
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> ToolOutcome:
         """调用一个工具。
@@ -179,6 +180,11 @@ class ToolRunner:
           - Agent 自身的决策推理（它是 Agent 的一步，不是工具）；
           - 本地状态读写（见 `state_op`）。
         它们仍然受单次超时与总时限约束，只是不占调用次数。
+
+        `timeout` 来自 `ToolSpec.timeout`，是**该工具自己声明的上限**。
+        它**只能收紧**，不能突破 Runner 默认值或本轮剩余预算 ——
+        一个工具不该有能力吃掉整轮。传 `None` 表示没有单独声明，
+        完全走 Runner 的默认行为。
         """
         if counted and self.budget.exhausted:
             reason = self.budget.exhausted_reason()
@@ -190,13 +196,15 @@ class ToolRunner:
             )
             return ToolOutcome(ok=False, error=reason, rejected=True)
 
-        return await self._invoke(name, func, counted=counted, **kwargs)
+        return await self._invoke(name, func, counted=counted, timeout=timeout, **kwargs)
 
     async def state_op(
         self,
         name: str,
         func: Callable[..., Awaitable[Any]],
         /,
+        *,
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> ToolOutcome:
         """调用一个**不计入预算**的本地状态操作（读/写学习状态）。
@@ -204,7 +212,7 @@ class ToolRunner:
         仍然走这里统一异常包装与留痕，只是不占用调用次数。
         理由见模块开头：它们不调外部服务，属于状态机自身的状态转移。
         """
-        return await self.call(name, func, counted=False, **kwargs)
+        return await self.call(name, func, counted=False, timeout=timeout, **kwargs)
 
     async def _invoke(
         self,
@@ -213,10 +221,22 @@ class ToolRunner:
         /,
         *,
         counted: bool,
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> ToolOutcome:
-        # 单次调用的超时不能超过整轮剩余时间 —— 否则一个慢调用会把整轮拖过总时限。
+        # 单次调用的超时受**三个**上限共同约束，谁最小听谁的：
         #
+        #   ① `timeout`（来自 `ToolSpec.timeout`）—— 工具自己声明的上限。
+        #      **只能收紧**：`min()` 保证它永远压不过 Runner 默认值，
+        #      所以一个工具不可能靠声明大数字来吃掉整轮。
+        #   ② `self.tool_timeout`（Runner 默认）—— 所有工具的兜底上限。
+        #   ③ `budget.remaining_seconds` —— 本轮还剩多少，绝不允许单次调用把它拖穿。
+        #
+        # ⚠️ 声明了 `ToolSpec.timeout` 就必须走到这里来 ——
+        # 它曾经是个**从未被读取的字段**（声明 40s 而实际恒为 20s），
+        # 这种"看起来配了、其实没生效"的状态比没有更危险。
+        ceiling = self.tool_timeout if timeout is None else min(self.tool_timeout, timeout)
+
         # ⚠️ **两类调用的下限策略是相反的**，这一点很容易写错：
         #
         #   `counted=True`（外部工具）—— **不加下限**。
@@ -229,10 +249,11 @@ class ToolRunner:
         #       它们不调外部服务、耗时以毫秒计，必须能跑完；
         #       给 0 会让学习状态在预算刚好耗尽时静默写不进去，
         #       而"状态没更新"这种失败很难被发现。
+        #       这个保底**优先于**更紧的声明 —— 本地操作"跑不完"比"慢一点"糟得多。
         if counted:
-            limit = max(0.0, min(self.tool_timeout, self.budget.remaining_seconds))
+            limit = max(0.0, min(ceiling, self.budget.remaining_seconds))
         else:
-            limit = max(1.0, min(self.tool_timeout, self.budget.remaining_seconds or 1.0))
+            limit = max(1.0, min(ceiling, self.budget.remaining_seconds or 1.0))
         started = time.perf_counter()
         try:
             # 工具既有异步的（调模型 / 查向量库）也有同步的（本地读写学习状态）。

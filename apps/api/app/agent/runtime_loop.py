@@ -407,10 +407,15 @@ class AgentLoop:
             tool_started = time.perf_counter()
             # 注意：**用 spec.handler 而不是从外面传函数** ——
             # 这正是"按名字查表执行"与"调用方手工传 func"的区别。
+            #
+            # `timeout=spec.timeout` 是**工具自己声明的上限**，
+            # 由 `ToolRunner._invoke` 与 Runner 默认值、本轮剩余预算取最小 ——
+            # 它只能收紧，不能突破。
             outcome = await self.runner.call(
                 spec.name,
                 spec.handler,
                 counted=spec.counted,
+                timeout=spec.timeout,
                 **decision.arguments,
             )
             tool_elapsed = int((time.perf_counter() - tool_started) * 1000)

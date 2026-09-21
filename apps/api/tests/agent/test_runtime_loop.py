@@ -37,7 +37,13 @@ from app.agent.tools.specs import ToolRegistry, ToolSpec, ToolResult
 # --------------------------------------------------------------------------- #
 # 测试台
 # --------------------------------------------------------------------------- #
-def _spec(name: str = "web_search", handler=None, *, required=("query",)) -> ToolSpec:
+def _spec(
+    name: str = "web_search",
+    handler=None,
+    *,
+    required=("query",),
+    timeout: float | None = None,
+) -> ToolSpec:
     async def default_handler(**kwargs) -> ToolResult:
         return ToolResult(ok=True, content=f"结果：{kwargs.get('query', '')}")
 
@@ -50,6 +56,7 @@ def _spec(name: str = "web_search", handler=None, *, required=("query",)) -> Too
             "properties": {key: {"type": "string"} for key in required},
         },
         handler=handler or default_handler,
+        timeout=timeout,
     )
 
 
@@ -365,6 +372,151 @@ async def test_uncounted_state_op_keeps_one_second_floor() -> None:
 
     assert outcome.ok is True, f"本地状态操作被饿死了：{outcome.error}"
     assert outcome.rejected is False
+
+
+# --------------------------------------------------------------------------- #
+# 二之四、ToolSpec.timeout 接线
+#
+# 背景：`ToolSpec.timeout` 曾经是**声明了却从未被读取**的字段 ——
+# `image_analysis` 写着 40.0，实际生效的一直是 Runner 默认的 20.0。
+# 这种"看起来配了、其实没生效"比没有更危险：下一个人会照着 40 去理解行为。
+#
+# 接线后的语义：最终上限 = `min(spec.timeout, runner.tool_timeout, 剩余预算)`。
+# **只能收紧，不能突破** —— 一个工具不该有能力吃掉整轮。
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_spec_timeout_tightens_the_call() -> None:
+    """`spec.timeout=1s` + 处理器要 3s → 实际约 1s 就被掐断。"""
+
+    async def slow(**kwargs) -> ToolResult:
+        await asyncio.sleep(3.0)
+        return ToolResult(ok=True, content="本该跑 3 秒")
+
+    runner = ToolRunner(max_calls=9, max_seconds=60.0)  # Runner 默认 20s
+    started = asyncio.get_event_loop().time()
+    outcome = await runner.call("web_search", slow, timeout=1.0, query="q")
+    elapsed = asyncio.get_event_loop().time() - started
+
+    assert outcome.ok is False
+    assert ">1.0s" in (outcome.error or ""), f"没按声明收紧：{outcome.error}"
+    assert elapsed < 2.0, f"实际跑了 {elapsed:.1f}s，说明声明没生效"
+    assert elapsed >= 0.9
+
+
+@pytest.mark.asyncio
+async def test_spec_timeout_none_falls_back_to_runner_default() -> None:
+    """`spec.timeout=None` → 完全走 Runner 默认（既有行为不变）。
+
+    用一个很小的 Runner 默认值来观察，避免为了证明 20s 而真等 20 秒。
+    """
+
+    async def slow(**kwargs) -> ToolResult:
+        await asyncio.sleep(2.0)
+        return ToolResult(ok=True, content="慢")
+
+    runner = ToolRunner(max_calls=9, max_seconds=60.0, tool_timeout=0.5)
+    outcome = await runner.call("web_search", slow, timeout=None, query="q")
+
+    assert outcome.ok is False
+    assert ">0.5s" in (outcome.error or ""), f"没回落到 Runner 默认：{outcome.error}"
+
+
+@pytest.mark.asyncio
+async def test_spec_timeout_cannot_exceed_runner_default() -> None:
+    """`spec.timeout=999s` → **仍被 Runner 默认卡住**（只能收紧不能突破）。"""
+
+    async def slow(**kwargs) -> ToolResult:
+        await asyncio.sleep(2.0)
+        return ToolResult(ok=True, content="慢")
+
+    runner = ToolRunner(max_calls=9, max_seconds=60.0, tool_timeout=0.5)
+    outcome = await runner.call("web_search", slow, timeout=999.0, query="q")
+
+    assert outcome.ok is False
+    assert ">0.5s" in (outcome.error or ""), f"声明突破了 Runner 默认：{outcome.error}"
+
+
+@pytest.mark.asyncio
+async def test_spec_timeout_cannot_exceed_remaining_budget() -> None:
+    """三者的**最小者**说了算：剩余预算比声明更小时，听剩余预算的。"""
+
+    async def slow(**kwargs) -> ToolResult:
+        await asyncio.sleep(3.0)
+        return ToolResult(ok=True, content="慢")
+
+    # 剩余预算只有 0.4s；声明 1.0s；Runner 默认 20s → 应当取 0.4s
+    runner = ToolRunner(max_calls=9, max_seconds=0.4)
+    outcome = await runner.call("web_search", slow, timeout=1.0, query="q")
+
+    assert outcome.ok is False
+    assert ">0.4s" in (outcome.error or ""), f"没受剩余预算约束：{outcome.error}"
+
+
+@pytest.mark.asyncio
+async def test_spec_timeout_does_not_break_the_uncounted_floor() -> None:
+    """⚠️ **阶段一确定的两类下限策略不能被这次接线改掉。**
+
+    本地状态操作有 1s 保底 —— 即使声明了一个更紧的 timeout，
+    这个保底仍然生效：本地操作"跑不完"比"慢一点"糟得多
+    （学习状态会静默写不进去）。
+    """
+
+    async def local_write(**kwargs) -> ToolResult:
+        await asyncio.sleep(0.3)
+        return ToolResult(ok=True, content="写好了")
+
+    runner = ToolRunner(max_calls=9, max_seconds=0.0)
+    # 声明 0.1s，比 1s 保底更紧 —— 保底应当压过它
+    outcome = await runner.state_op("state_op", local_write, timeout=0.1)
+
+    assert outcome.ok is True, f"本地状态操作被更紧的声明掐断了：{outcome.error}"
+
+
+def test_registered_tool_timeouts_never_exceed_the_runner_default() -> None:
+    """**所有注册工具声明的 timeout 都不得超过 Runner 默认值。**
+
+    这是一条防回归的护栏：将来有人给某个工具写上 40、999 这种"想多要点时间"的数，
+    会被这里拦下 —— 因为那种声明**永远不会生效**（`min()` 会把它压回去），
+    写出来只会误导下一个读代码的人。
+    """
+    from app.agent.tool_specs import register_all
+    from app.agent.tools.registry import DEFAULT_TOOL_TIMEOUT
+    from app.agent.tools.specs import ToolRegistry
+
+    registry = ToolRegistry()
+    register_all(registry)
+
+    offenders = [
+        (s.name, s.timeout)
+        for s in registry.all()
+        if s.timeout is not None and s.timeout > DEFAULT_TOOL_TIMEOUT
+    ]
+    assert not offenders, (
+        f"这些工具声明了超过 Runner 默认值（{DEFAULT_TOOL_TIMEOUT}s）的 timeout，"
+        f"而它永远不会生效：{offenders}"
+    )
+
+
+def test_image_analysis_declares_the_runner_default() -> None:
+    """`image_analysis` 是**最慢的工具**，声明"要满额时间"。
+
+    它原来写的是 40.0 —— 比 Runner 默认还宽，是个**永远不生效**的声明。
+    改成 Runner 默认值之后：语义正确（只能收紧）、
+    同时让"视觉很慢"这件事在代码里可见，而不是藏在默认值里。
+    """
+    from app.agent.tool_specs import register_all
+    from app.agent.tools.registry import DEFAULT_TOOL_TIMEOUT
+    from app.agent.tools.specs import ToolRegistry
+
+    registry = ToolRegistry()
+    register_all(registry)
+
+    spec = registry.get("image_analysis")
+    assert spec is not None, "image_analysis 应当已注册"
+    assert spec.timeout is not None, "视觉是最慢的工具，应当显式声明它需要满额时间"
+    assert spec.timeout == DEFAULT_TOOL_TIMEOUT, (
+        f"应当等于 Runner 默认值 {DEFAULT_TOOL_TIMEOUT}，实际 {spec.timeout}"
+    )
 
 
 # --------------------------------------------------------------------------- #

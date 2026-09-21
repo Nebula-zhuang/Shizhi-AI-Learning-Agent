@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.agent.tools.registry import DEFAULT_TOOL_TIMEOUT
 from app.core.config import settings
 from app.core.llm import LLMError, llm_gateway, message_text, user_message, vision_gateway
 from app.core.logging import get_logger
@@ -542,7 +543,15 @@ def register_all(
                 image_analysis, image_paths=list(images), default_question=user_question
             ),
             counted=True,
-            timeout=40.0,
+            # 视觉是**最慢的工具** —— 实测一张几百像素的小图也要 15~20s+。
+            # 这里声明"它要满额时间"，是对 Runner 默认值的显式确认。
+            #
+            # ⚠️ 它**只能收紧不能突破**：最终上限取
+            # `min(这里, Runner 默认, 本轮剩余预算)`，
+            # 所以这个声明不会让视觉去挤占别的工具，也不会拖穿整轮时限。
+            # 之前这里写的是 40.0 —— 那比 Runner 默认还宽，
+            # 而 `ToolSpec.timeout` 当时根本没被读取，是个**看起来配了却无效**的字段。
+            timeout=DEFAULT_TOOL_TIMEOUT,
             #: 不支持视觉时**不进给模型的清单** ——
             #: 让它看见一个注定失败的工具，只会浪费一次决策。
             available=lambda: (
