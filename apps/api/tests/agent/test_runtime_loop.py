@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 import pytest
 
 from app.agent.runtime_loop import (
+    MIN_USEFUL_TOOL_SECONDS,
     AgentLoop,
     LoopDecision,
     LoopLimits,
@@ -33,8 +34,6 @@ from app.agent.runtime_loop import (
 )
 from app.agent.tools.registry import ToolRunner
 from app.agent.tools.specs import ToolRegistry, ToolSpec, ToolResult
-
-
 # --------------------------------------------------------------------------- #
 # 测试台
 # --------------------------------------------------------------------------- #
@@ -78,17 +77,27 @@ async def _run(
     specs: list[ToolSpec] | None = None,
     limits: LoopLimits | None = None,
     max_calls: int = 99,
+    max_seconds: float | None = None,
     observation: LoopObservation | None = None,
 ) -> dict:
-    """跑一轮，返回 done 事件的 data。"""
+    """跑一轮，返回 done 事件的 data。
+
+    `max_seconds` **默认不传**（沿用 `ToolRunner` 的默认值）——
+    这样既有用例的行为一字不变。要测"剩余预算不足"的用例才需要它，
+    因为生产代码 `free_study.stream_turn` 是**把 `limits.total_seconds` 传给 runner 的**，
+    而这里原来没传，两者本来就不一致。
+    """
     registry = ToolRegistry()
     for spec in specs or [_spec()]:
         registry.register(spec)
 
     decider = _Scripted(decisions)
+    runner_kwargs: dict = {"max_calls": max_calls}
+    if max_seconds is not None:
+        runner_kwargs["max_seconds"] = max_seconds
     loop = AgentLoop(
         registry=registry,
-        runner=ToolRunner(max_calls=max_calls),
+        runner=ToolRunner(**runner_kwargs),
         decider=decider,
         generate=_generate,
         limits=limits or LoopLimits(max_steps=20, max_tool_calls=99, total_seconds=60),
@@ -98,6 +107,8 @@ async def _run(
     async for event in loop.run(observation or LoopObservation(question="q")):
         if event.event == "done":
             result = event.data
+    # 附上决策函数被调了几次 —— "有没有空转"要靠它来判断
+    result["decider_calls"] = decider.calls
     return result
 
 
@@ -210,6 +221,150 @@ async def test_total_timeout_is_enforced() -> None:
     assert "查得比较久" in done["stop_note"]
     # 印证"只有总时限能挡住这种情形" —— 调用次数远没到上限
     assert done["tool_calls"] < 20
+
+
+# --------------------------------------------------------------------------- #
+# 二之二、剩余预算不足时不要硬发调用
+#
+# 背景：`ToolBudget` 只判断"已经花了多久"，不管"剩下的够不够做一件事"。
+# 于是循环会在只剩零点几秒时照常发起调用 —— 那次必然超时，
+# **失败但占用一次调用配额**，等待时间还计入整轮耗时。
+# 下面四条守住修好之后的行为。
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_low_remaining_budget_skips_the_handler() -> None:
+    """剩余预算低于下限 → **处理器一次都不该被调用**。
+
+    构造：runner 的预算只有 1.0s（< MIN_USEFUL_TOOL_SECONDS），
+    而循环的总时限是 60s（所以下限就是那个常量本身）。
+    此时不该再发起任何工具调用。
+    """
+    called: list[str] = []
+
+    async def spy(**kwargs) -> ToolResult:
+        called.append(kwargs.get("query", ""))
+        return ToolResult(ok=True, content="不该被调用")
+
+    done = await _run(
+        decisions=[LoopDecision(tool="web_search", arguments={"query": "q"}) for _ in range(10)],
+        specs=[_spec(handler=spy)],
+        limits=LoopLimits(max_steps=20, max_tool_calls=99, total_seconds=60),
+        max_seconds=1.0,
+    )
+
+    assert called == [], "剩余预算不足时仍然发起了工具调用"
+    assert done["tool_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_low_remaining_budget_does_not_spin() -> None:
+    """剩余预算不足 → **立刻停**，不能空转。
+
+    这条是这次修改最容易踩的坑：如果改法是"工具调用器里拒绝并返回失败"，
+    那么被拒绝的调用**既不消耗次数也不耗时**（`ToolBudget.used` 会滤掉
+    `rejected` 的条目），时间不推进 → 循环顶部的判断永远为假 →
+    一直拒绝到 `max_steps` 耗尽。表现就是"步数暴涨但什么也没做"。
+
+    所以判断必须放在**循环自己的 out_of_time()** 里。
+    """
+    done = await _run(
+        decisions=[LoopDecision(tool="web_search", arguments={"query": "q"}) for _ in range(10)],
+        limits=LoopLimits(max_steps=20, max_tool_calls=99, total_seconds=60),
+        max_seconds=1.0,
+    )
+
+    # 决策函数一次都没被调用 = 没有空转
+    assert done["decider_calls"] == 0, "空转了：预算不足还在反复向模型要决策"
+    assert len(done["steps"]) == 1, f"应当一步就收尾，实际 {len(done['steps'])} 步"
+
+
+@pytest.mark.asyncio
+async def test_low_remaining_budget_uses_existing_degrade_path() -> None:
+    """走的必须是**已有的降级路径**，不是新造一条。
+
+    `out_of_time()` 的两个条件共用同一段 `stop_note` ——
+    对用户来说"这次查得比较久"在两种情况下都成立，
+    而新增一条独立文案只会让前端多一个要处理的分支。
+    """
+    done = await _run(
+        decisions=[LoopDecision(tool="web_search", arguments={"query": "q"}) for _ in range(10)],
+        limits=LoopLimits(max_steps=20, max_tool_calls=99, total_seconds=60),
+        max_seconds=1.0,
+    )
+
+    assert done["degraded"] is True
+    assert "查得比较久" in done["stop_note"]
+    # 降级路径必须仍然产出回答，而不是空手而归
+    assert done["answer"] == "最终回答"
+
+
+@pytest.mark.asyncio
+async def test_small_total_budget_still_exercises_cumulative_timeout() -> None:
+    """总预算本身就很小的时候，下限要跟着收缩，否则会**一步就停**。
+
+    `test_total_timeout_is_enforced` 用 `total_seconds=1.0` 模拟超时。
+    如果下限死用常量 2.0，那个用例会变成"第 1 步就停、0 次调用"——
+    断言仍会通过，但**它守的"累计超时"逻辑根本没被走到**，等于空转通过。
+    所以下限取 `min(常量, 总预算 / 2)`。
+    """
+    async def quick(**kwargs) -> ToolResult:
+        await asyncio.sleep(0.1)
+        return ToolResult(ok=True, content="快")
+
+    done = await _run(
+        decisions=[LoopDecision(tool="web_search", arguments={"query": "q"}) for _ in range(20)],
+        specs=[_spec(handler=quick)],
+        limits=LoopLimits(max_steps=50, max_tool_calls=99, total_seconds=1.0),
+        max_seconds=1.0,
+    )
+
+    assert done["degraded"] is True
+    assert "查得比较久" in done["stop_note"]
+    # 关键：确实**发起过**调用，说明累积到超时才停，而不是一上来就判定时间不够
+    assert done["tool_calls"] > 0, "一步都没调就停了 —— 下限没有随小总预算收缩"
+
+
+# --------------------------------------------------------------------------- #
+# 二之三、ToolRunner 的超时下限：两类调用的策略是相反的
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_counted_tool_does_not_borrow_time() -> None:
+    """外部工具的调用**不再**被补到 1s —— 报错里的数字就是真实上限。
+
+    修之前是 `max(1.0, min(...))`：只剩 0.2s 也会给 1.0s，
+    等于凭空多花 0.8s 去等一次注定失败的调用。
+    """
+    async def slow(**kwargs) -> ToolResult:
+        await asyncio.sleep(2.0)
+        return ToolResult(ok=True, content="慢")
+
+    # 预算 0.3s，调用必然超时；关键看它给的上限是多少
+    runner = ToolRunner(max_calls=9, max_seconds=0.3)
+    outcome = await runner.call("web_search", slow, query="q")
+
+    assert outcome.ok is False
+    assert "超时" in (outcome.error or "")
+    # 上限应当是真实的剩余 0.3s，而不是被抬到 1.0s
+    assert ">0.3s" in (outcome.error or ""), f"上限被抬高了：{outcome.error}"
+
+
+@pytest.mark.asyncio
+async def test_uncounted_state_op_keeps_one_second_floor() -> None:
+    """本地状态操作**保留** 1s 下限 —— 它们必须能跑完。
+
+    这类调用不碰外部服务、耗时以毫秒计，但在预算刚好耗尽时
+    给 0 会让学习状态**静默写不进去**，而那是最难发现的一类失败。
+    """
+    async def local_write(**kwargs) -> ToolResult:
+        await asyncio.sleep(0.3)
+        return ToolResult(ok=True, content="写好了")
+
+    # 预算已经耗尽（0 秒）
+    runner = ToolRunner(max_calls=9, max_seconds=0.0)
+    outcome = await runner.state_op("state_op", local_write)
+
+    assert outcome.ok is True, f"本地状态操作被饿死了：{outcome.error}"
+    assert outcome.rejected is False
 
 
 # --------------------------------------------------------------------------- #

@@ -44,6 +44,17 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+#: 剩余时间低于这个数，就**不值得再发起一次外部工具调用**了。
+#:
+#: 一次真实工具调用的量级是秒级（联网 2~8s、看图 15~20s），
+#: 只剩一两秒时发起的调用几乎必然超时 —— 它失败、**仍占用一次调用配额**，
+#: 而那段等待还会算进整轮耗时。与其这样，不如直接走降级回答。
+#:
+#: 注意与 `ToolBudget.max_seconds` 的分工：那一条管"已经花了多久"，
+#: 这一条管"还剩下的够不够做一件事"。两条都必要 ——
+#: 只有前者时，循环会在预算将尽的边界上发起注定失败的调用。
+MIN_USEFUL_TOOL_SECONDS = 2.0
+
 
 class LoopState(StrEnum):
     """循环的全部状态。"""
@@ -229,8 +240,28 @@ class AgentLoop:
         def elapsed_ms() -> int:
             return int((time.perf_counter() - started) * 1000)
 
+        def useful_floor() -> float:
+            """低于这个剩余时间就不再发起工具调用。
+
+            ⚠️ 取 `min(常量, 总预算的一半)`，而不是直接用常量 ——
+            否则 `total_seconds` 本身比常量小的场景（测试里用 1.0s 模拟超时就是）
+            会在**第一步**就判定"时间不够"，于是"累计超时才停"这条逻辑
+            永远不会被走到，守着它的测试也就变成了空转通过。
+            """
+            return min(MIN_USEFUL_TOOL_SECONDS, self.limits.total_seconds / 2)
+
         def out_of_time() -> bool:
-            return (time.perf_counter() - started) >= self.limits.total_seconds
+            """整轮时间是否已经不够继续。
+
+            两个条件，缺一不可：
+
+            1. **已经超了总时限** —— 原来的判断。
+            2. **剩余的不足以再做一件事** —— 新增。只有第 1 条时，
+               循环会在"还剩 0.3 秒"的边界上照常发起调用，那次调用必然超时。
+            """
+            if (time.perf_counter() - started) >= self.limits.total_seconds:
+                return True
+            return self.runner.budget.remaining_seconds < useful_floor()
 
         # ─────────────────────────────────────────── 循环
         while True:

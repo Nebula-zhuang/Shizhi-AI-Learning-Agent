@@ -215,8 +215,24 @@ class ToolRunner:
         counted: bool,
         **kwargs: Any,
     ) -> ToolOutcome:
-        # 单次调用的超时不能超过整轮剩余时间 —— 否则一个慢调用会把整轮拖过 30 秒。
-        limit = max(1.0, min(self.tool_timeout, self.budget.remaining_seconds or 1.0))
+        # 单次调用的超时不能超过整轮剩余时间 —— 否则一个慢调用会把整轮拖过总时限。
+        #
+        # ⚠️ **两类调用的下限策略是相反的**，这一点很容易写错：
+        #
+        #   `counted=True`（外部工具）—— **不加下限**。
+        #       剩余时间不够时，循环层已经不会再发起调用了
+        #       （见 `runtime_loop.MIN_USEFUL_TOOL_SECONDS`）。
+        #       这里若再补一个 1s 下限，就成了"只剩 0.2s 却发一次注定超时的调用"：
+        #       它必然失败、**仍占用一次调用配额**，而且那段等待还会计入整轮耗时。
+        #
+        #   `counted=False`（本地状态读写）—— **保留 1s 下限**。
+        #       它们不调外部服务、耗时以毫秒计，必须能跑完；
+        #       给 0 会让学习状态在预算刚好耗尽时静默写不进去，
+        #       而"状态没更新"这种失败很难被发现。
+        if counted:
+            limit = max(0.0, min(self.tool_timeout, self.budget.remaining_seconds))
+        else:
+            limit = max(1.0, min(self.tool_timeout, self.budget.remaining_seconds or 1.0))
         started = time.perf_counter()
         try:
             # 工具既有异步的（调模型 / 查向量库）也有同步的（本地读写学习状态）。
