@@ -35,10 +35,13 @@ import {
   getCapabilities,
   listConversations,
   listMessages,
+  listSavedKnowledge,
   renameConversation,
+  saveKnowledge,
   uploadAttachment,
   type AttachmentUpload,
   type ConversationSummary,
+  type SavedKnowledgeItem,
   type StudyCapabilities,
   type StudyMessage,
   type ToolEvent,
@@ -46,13 +49,46 @@ import {
   type TurnSource,
 } from '../../api/study'
 import { stripBlockMarkup, stripInlineMarkup } from '../../lib/plainText'
-import { Button, EmptyState, IconClose, IconPlus, IconSpark, IconTrash, cn } from '../../ui'
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  IconBookmark,
+  IconClose,
+  IconPlus,
+  IconSpark,
+  IconTrash,
+  Skeleton,
+  cn,
+} from '../../ui'
 import { useToast } from '../../ui/overlays'
+import {
+  formatSavedAt,
+  hasMoreSaved,
+  mergeSavedItems,
+  saveButtonLabel,
+  saveEligibility,
+  saveFailureMessage,
+  savedItemTitle,
+  savedMessageIdsOf,
+  statusOf,
+} from './savedKnowledge'
 
 /** 一行对话在界面上的样子 */
 interface Turn {
-  /** 本地临时 id（负数）。落库后由服务端返回的 id 取代。 */
+  /**
+   * 本地临时 id。
+   *
+   * ⚠️ 它**不是**服务端 id —— 流式生成时还没有服务端 id。
+   * 服务端 id 在落库后由 `persisted` 事件送到 `messageId`，
+   * 而 `key` 保持不变（它只是 React 的列表身份）。
+   */
   key: string
+  /**
+   * 这条消息在服务端的 id。
+   * 落库成功后才有；有了它才能"保存这一轮"（正文由服务端按 id 取）。
+   */
+  messageId?: number
   role: 'user' | 'assistant'
   content: string
   sources: TurnSource[]
@@ -86,6 +122,18 @@ export function FreeStudyView() {
   const [dragging, setDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // ── 保存知识（Phase 3C）
+  //
+  // 已保存的列表是**跨对话**的（后端按 learner 隔离），所以它不属于任何一个
+  // 对话 —— 组件挂载时读一次，保存成功后本地补一条，不必重拉。
+  const [savedItems, setSavedItems] = useState<SavedKnowledgeItem[]>([])
+  const [savedTotal, setSavedTotal] = useState(0)
+  const [savedLoading, setSavedLoading] = useState(true)
+  const [savedError, setSavedError] = useState('')
+  /** 正在保存的那条消息 id —— 用来禁用按钮、挡住重复点击 */
+  const [savingMessageId, setSavingMessageId] = useState<number | null>(null)
+  const savedMessageIds = useMemo(() => savedMessageIdsOf(savedItems), [savedItems])
+
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -109,6 +157,64 @@ export function FreeStudyView() {
       alive = false
     }
   }, [toast])
+
+  // ── 已保存的知识：挂载时读一次
+  const loadSaved = useCallback(async () => {
+    setSavedLoading(true)
+    setSavedError('')
+    try {
+      const page = await listSavedKnowledge(20, 0)
+      setSavedItems(page.items)
+      setSavedTotal(page.total)
+    } catch (error) {
+      // 读不出来**不影响对话** —— 面板里显示失败态即可，不弹 toast 打扰
+      setSavedError(saveFailureMessage(statusOf(error), (error as Error).message))
+    } finally {
+      setSavedLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadSaved()
+  }, [loadSaved])
+
+  const loadMoreSaved = useCallback(async () => {
+    setSavedLoading(true)
+    setSavedError('')
+    try {
+      const page = await listSavedKnowledge(20, savedItems.length)
+      setSavedItems((prev) => mergeSavedItems(prev, page.items))
+      setSavedTotal(page.total)
+    } catch (error) {
+      setSavedError(saveFailureMessage(statusOf(error), (error as Error).message))
+    } finally {
+      setSavedLoading(false)
+    }
+  }, [savedItems.length])
+
+  /**
+   * 保存一条助手消息。
+   *
+   * ⚠️ **只把 messageId 发出去**，正文由服务端从那条消息里取 ——
+   * 这是后端的硬约定（保存下来的东西将来会被检索、被引用）。
+   */
+  const handleSave = useCallback(
+    async (messageId: number) => {
+      setSavingMessageId(messageId)
+      try {
+        const created = await saveKnowledge(messageId)
+        // 本地直接补进列表，不重拉 —— 重拉会让面板闪一下
+        setSavedItems((prev) => mergeSavedItems([created], prev))
+        setSavedTotal((total) => total + 1)
+        toast.success('已保存', '在右侧「已保存的知识」里能找到它。')
+      } catch (error) {
+        toast.error('没能保存', saveFailureMessage(statusOf(error), (error as Error).message))
+      } finally {
+        setSavingMessageId(null)
+      }
+    },
+    [toast],
+  )
 
   // ── 新消息进来后滚到底部
   useEffect(() => {
@@ -135,6 +241,9 @@ export function FreeStudyView() {
         setTurns(
           data.items.map((m: StudyMessage) => ({
             key: `srv-${m.id}`,
+            // ⚠️ 服务端 id 要**单独存进 `messageId`**，不能只藏在 key 里 ——
+            // "保存这一轮"凭的是它（正文由服务端按 id 取），藏在字符串里没法用。
+            messageId: m.id,
             role: m.role,
             content: m.content,
             sources: m.sources ?? [],
@@ -325,6 +434,9 @@ export function FreeStudyView() {
         // 消息条数变了，列表要跟着更新（标题也可能被后端自动生成）
         void listConversations().then((data) => setConversations(data.items))
       },
+      // 落库成功后后端才推这一帧。拿到它，这条回答才**可以被保存** ——
+      // `done` 到达时 id 还不存在（后端是先推 done、再落库）。
+      onPersisted: (messageId) => patch((t) => ({ ...t, messageId })),
       onError: (message) => {
         patch((t) => ({
           ...t,
@@ -399,7 +511,13 @@ export function FreeStudyView() {
           ) : (
             <div className="space-y-6">
               {turns.map((turn) => (
-                <TurnBlock key={turn.key} turn={turn} />
+                <TurnBlock
+                  key={turn.key}
+                  turn={turn}
+                  savedMessageIds={savedMessageIds}
+                  savingMessageId={savingMessageId}
+                  onSave={(messageId) => void handleSave(messageId)}
+                />
               ))}
             </div>
           )}
@@ -440,6 +558,23 @@ export function FreeStudyView() {
           <section className="rounded-xl border border-line bg-paper-raised p-3">
             <p className="mb-2 text-xs font-medium text-ink-2">它做了什么</p>
             <ToolTrail turn={latestPanel} />
+          </section>
+
+          {/* 已保存的知识是**跨对话**的，所以它不跟 `latestPanel` 走 ——
+              放在这里只是借右侧这块地方，与上面两节的性质不同。 */}
+          <section className="rounded-xl border border-line bg-paper-raised p-3">
+            <p className="mb-2 text-xs font-medium text-ink-2">
+              已保存的知识
+              {savedTotal > 0 && <span className="ml-1 text-ink-4">（{savedTotal}）</span>}
+            </p>
+            <SavedKnowledgePanel
+              items={savedItems}
+              total={savedTotal}
+              loading={savedLoading}
+              error={savedError}
+              onRetry={() => void loadSaved()}
+              onLoadMore={() => void loadMoreSaved()}
+            />
           </section>
         </aside>
       )}
@@ -536,7 +671,17 @@ function ConversationRow({
   )
 }
 
-function TurnBlock({ turn }: { turn: Turn }) {
+function TurnBlock({
+  turn,
+  savedMessageIds,
+  savingMessageId,
+  onSave,
+}: {
+  turn: Turn
+  savedMessageIds: ReadonlySet<number>
+  savingMessageId: number | null
+  onSave: (messageId: number) => void
+}) {
   if (turn.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -589,6 +734,66 @@ function TurnBlock({ turn }: { turn: Turn }) {
           ))}
         </ul>
       )}
+
+      <SaveAction
+        turn={turn}
+        savedMessageIds={savedMessageIds}
+        savingMessageId={savingMessageId}
+        onSave={onSave}
+      />
+    </div>
+  )
+}
+
+/**
+ * 「保存知识」入口。
+ *
+ * 三条规矩（都在 `savedKnowledge.ts` 里，这里只负责画）：
+ *
+ * 1. **没有服务端 id 就不显示可点的按钮。** 保存凭的是 `messageId`，
+ *    让用户点一个注定 404 的按钮，比不给按钮更糟。
+ * 2. **已保存是一个状态**，不是还能再点的动作 —— 避免重复保存。
+ * 3. 保存中禁用，挡住连点。
+ */
+function SaveAction({
+  turn,
+  savedMessageIds,
+  savingMessageId,
+  onSave,
+}: {
+  turn: Turn
+  savedMessageIds: ReadonlySet<number>
+  savingMessageId: number | null
+  onSave: (messageId: number) => void
+}) {
+  const eligibility = saveEligibility(turn, savedMessageIds)
+  // 用户消息、流式中、落库失败的空回答……都不该出现这一行
+  if (turn.role !== 'assistant' || turn.streaming) return null
+  if (eligibility.reason === 'no-message-id' || eligibility.reason === 'empty') return null
+
+  const saving = savingMessageId !== null && savingMessageId === turn.messageId
+  const done = eligibility.reason === 'already-saved'
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        disabled={!eligibility.canSave || saving}
+        title={eligibility.hint || '把这一轮存下来，之后可以跨对话搜到'}
+        onClick={() => {
+          if (turn.messageId === undefined) return
+          onSave(turn.messageId)
+        }}
+        className={cn(
+          'meta inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors',
+          done
+            ? 'cursor-default text-moss-ink'
+            : 'text-ink-4 hover:bg-paper-sunken hover:text-ink-1 disabled:cursor-not-allowed disabled:opacity-50',
+        )}
+      >
+        <IconBookmark size={11} />
+        {saveButtonLabel(eligibility, saving)}
+      </button>
     </div>
   )
 }
@@ -702,6 +907,81 @@ function SourceList({ turn }: { turn: Turn | null }) {
         </li>
       ))}
     </ul>
+  )
+}
+
+/**
+ * 右侧面板的「已保存的知识」。
+ *
+ * 与上面两节的**性质不同**：`SourceList` / `ToolTrail` 讲的是"这一轮"，
+ * 而这里是**跨对话**的一个列表（后端按 learner 隔离）。
+ *
+ * 三个状态都复用现有组件，不另造轮子；**失败时只占这一小块**，
+ * 不影响对话本身 —— 读不出保存列表不是"这轮学不成"。
+ */
+function SavedKnowledgePanel({
+  items,
+  total,
+  loading,
+  error,
+  onRetry,
+  onLoadMore,
+}: {
+  items: SavedKnowledgeItem[]
+  total: number
+  loading: boolean
+  error: string
+  onRetry: () => void
+  onLoadMore: () => void
+}) {
+  if (error) {
+    return <ErrorState title="没读出已保存的知识" message={error} onRetry={onRetry} />
+  }
+
+  if (loading && items.length === 0) {
+    return (
+      <div className="space-y-2" aria-hidden="true">
+        <Skeleton width="86%" height={11} />
+        <Skeleton width="62%" height={11} />
+        <Skeleton width="74%" height={11} />
+      </div>
+    )
+  }
+
+  if (items.length === 0) {
+    return (
+      <p className="text-2xs leading-relaxed text-ink-4">
+        还没有保存过。在任意一条回答下面点「保存知识」，它就会出现在这里 ——
+        以后再问相关的东西，我会想起你存过。
+      </p>
+    )
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <ul className="space-y-2.5">
+        {items.map((item) => (
+          <li key={item.id} className="text-2xs leading-relaxed">
+            <span className="block text-ink-2">{savedItemTitle(item)}</span>
+            <span className="mt-0.5 block text-ink-4">
+              {formatSavedAt(item.created_at)}
+              {item.tags && item.tags.length > 0 && ` ｜${item.tags.join('、')}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      {hasMoreSaved(items.length, total) && (
+        <button
+          type="button"
+          disabled={loading}
+          onClick={onLoadMore}
+          className="meta rounded px-1 py-0.5 text-ink-4 transition-colors hover:bg-paper-sunken hover:text-ink-1 disabled:opacity-50"
+        >
+          {loading ? '正在读…' : `还有 ${total - items.length} 条`}
+        </button>
+      )}
+    </div>
   )
 }
 

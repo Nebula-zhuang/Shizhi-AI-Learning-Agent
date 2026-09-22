@@ -194,6 +194,49 @@ export function listAttachments(): Promise<{ items: AttachmentOption[] }> {
   return getJson<{ items: AttachmentOption[] }>('/api/study/attachments')
 }
 
+// --------------------------------------------------------------------------- //
+// 保存知识（后端 Phase 3A/3B 的能力，Phase 3C 接入界面）
+// --------------------------------------------------------------------------- //
+export interface SavedKnowledgeItem {
+  id: number
+  question: string
+  answer: string
+  source_message_id: number | null
+  source_urls: { title: string; url: string }[] | null
+  kp_ids: number[] | null
+  tags: string[] | null
+  /** 向量库里的 id。为 null 表示这条暂时搜不到（写向量失败，可事后回填）。 */
+  embedding_id: string | null
+  created_at: string
+}
+
+export interface SavedKnowledgeList {
+  items: SavedKnowledgeItem[]
+  total: number
+}
+
+/**
+ * 保存一条助手消息。
+ *
+ * ⚠️ **只传 message_id，不传正文。** 正文由服务端从那条消息里取 ——
+ * 这是后端的硬约定：保存下来的东西将来会被检索、被引用，
+ * 不能让任意文本（包括被篡改的前端内容）混进"我保存的知识"里。
+ */
+export function saveKnowledge(
+  messageId: number,
+  tags?: string[],
+): Promise<SavedKnowledgeItem> {
+  return postJson<SavedKnowledgeItem>('/api/study/knowledge', {
+    message_id: messageId,
+    ...(tags && tags.length > 0 ? { tags } : {}),
+  })
+}
+
+export function listSavedKnowledge(limit = 20, offset = 0): Promise<SavedKnowledgeList> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  return getJson<SavedKnowledgeList>(`/api/study/knowledge?${query.toString()}`)
+}
+
 /**
  * PATCH 的封装。
  *
@@ -270,6 +313,14 @@ export interface AskHandlers {
     fallback_reason: string
   }) => void
   onError?: (message: string) => void
+  /**
+   * 落库成功后的那条助手消息的 id。
+   *
+   * ⚠️ 它**必然在 `done` 之后**到达 —— 后端把 `persisted` 放在
+   * `append_message` 成功之后才推（落库失败就不推）。
+   * 所以"保存这一轮"要等这个回调，而不是 `done`。
+   */
+  onPersisted?: (messageId: number) => void
   signal?: AbortSignal
 }
 
@@ -359,6 +410,13 @@ export async function askQuestion(
       case 'error':
         handlers.onError?.(String(payload.text ?? '这轮回答没能完成。'))
         break
+      case 'persisted': {
+        // 落库成功后才会来这一帧。拿不到合法 id 就当没收到 ——
+        // 前端绝不能自己编一个 id 去保存（后端会 404）。
+        const id = Number(payload.message_id)
+        if (Number.isInteger(id) && id > 0) handlers.onPersisted?.(id)
+        break
+      }
       default:
         break
     }

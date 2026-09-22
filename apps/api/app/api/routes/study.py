@@ -401,7 +401,7 @@ async def ask(
             return
 
         try:
-            study_service.append_message(
+            stored = study_service.append_message(
                 db,
                 conversation=conversation,
                 role=MessageAuthor.ASSISTANT,
@@ -415,6 +415,17 @@ async def ask(
             # 落库失败不该让用户看不到已经生成的回答（它已经推过去了），
             # 但必须留下记录，否则"聊过但历史里没有"会变成一个查不出的怪现象
             logger.error("自由学习消息落库失败：%s", exc)
+        else:
+            # ⚠️ **必须在落库成功之后**才推这个事件。
+            #
+            # 为什么需要它：`done` 是在落库**之前**推出去的（那时 id 还不存在），
+            # 所以前端拿到 `done` 时**不知道自己刚收到的回答是哪条消息** ——
+            # 而"保存这一轮"必须凭服务端的 message_id 完成
+            # （正文只能来自真实消息，不接受前端提交 question/answer）。
+            #
+            # 放在 `else` 里而不是 `try` 末尾：落库失败时**绝不能**推一个假 id，
+            # 否则前端会拿着不存在的 id 去保存，报一个让人摸不着头脑的 404。
+            yield _sse("persisted", {"message_id": int(stored.id)})
 
     return StreamingResponse(
         event_source(),
