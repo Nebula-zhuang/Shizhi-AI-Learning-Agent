@@ -327,6 +327,8 @@ def test_existing_routes_still_registered() -> None:
         "/api/study/conversations",
         "/api/study/conversations/{conversation_id}/ask",
         "/api/study/capabilities",
+        # Phase 3A 保存知识。同样加进守护列表，而不是只改总数。
+        "/api/study/knowledge",
     ):
         assert required in paths, f"既有接口缺失：{required}"
     # P6 新增 2 个流式入口（/api/tutor/start/stream、/api/tutor/answer/stream）——
@@ -336,4 +338,6 @@ def test_existing_routes_still_registered() -> None:
     # 同样**只是新增**：既有 35 个路径一个没动。
     # P7 自由学习空间新增 6 个路径（对话 CRUD + 提问流 + 能力自检 + 可选资料）。
     # 同样是**只增不改**：上面那些既有接口一个没动。
-    assert len(paths) == 46, f"路径总数应为 46（P0-P6 的 40 + 自由学习 6），实际 {len(paths)}"
+    # Phase 3A 新增 1 个路径（/api/study/knowledge —— POST 保存与 GET 列出共用同一路径）。
+    # 依旧是**只增不改**。
+    assert len(paths) == 47, f"路径总数应为 47（P0-P6 的 40 + 自由学习 6 + 保存知识 1），实际 {len(paths)}"

@@ -27,6 +27,12 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.conversation import MessageAuthor
+from app.models.saved_knowledge import SavedKnowledge
+from app.schemas.saved_knowledge import (
+    SavedKnowledgeCreate,
+    SavedKnowledgeItem,
+    SavedKnowledgeListResponse,
+)
 from app.schemas.study import (
     AttachmentUploadResponse,
     McpStatus,
@@ -43,7 +49,12 @@ from app.schemas.study import (
 from app.ingestion import storage
 from app.ingestion.base import ParserError
 from app.ingestion.router import validate_upload
-from app.services import document_service, ingest_runner, study_service
+from app.services import (
+    document_service,
+    ingest_runner,
+    saved_knowledge_service,
+    study_service,
+)
 
 logger = get_logger(__name__)
 
@@ -168,6 +179,64 @@ def list_messages(
         raise HTTPException(status_code=404, detail="这个对话不存在。") from None
     return MessageListResponse(
         conversation_id=conversation_id, items=[_to_message_item(m) for m in rows]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 保存知识（Phase 3A）
+#
+# 与上面"对话"的关系：**只进不出** —— 从一段对话里把某一轮**复制**进知识库，
+# 此后再也不依赖那条对话。所以这里没有"删除对话时级联删保存"的逻辑（也不该有）。
+# --------------------------------------------------------------------------- #
+def _to_saved_item(record: SavedKnowledge) -> SavedKnowledgeItem:
+    return SavedKnowledgeItem(
+        id=int(record.id),
+        question=record.question,
+        answer=record.answer,
+        source_message_id=record.source_message_id,
+        source_urls=record.source_urls,
+        kp_ids=record.kp_ids,
+        tags=record.tags,
+        embedding_id=record.embedding_id,
+        created_at=record.created_at,
+    )
+
+
+@router.post("/knowledge", response_model=SavedKnowledgeItem, summary="保存一轮到知识库")
+def save_knowledge(
+    payload: SavedKnowledgeCreate,
+    db: Session = Depends(get_db),
+    learner_id: str = Depends(require_learner_id),
+):
+    """把一条**助手消息**保存进知识库。
+
+    正文由服务端从消息里取（客户端只给 id）—— 见 `SavedKnowledgeCreate` 的理由。
+    """
+    try:
+        record = saved_knowledge_service.save_from_message(
+            db,
+            learner_id=learner_id,
+            message_id=payload.message_id,
+            tags=payload.tags,
+        )
+    except saved_knowledge_service.SavedKnowledgeNotFound:
+        # 不存在与不是你的**都返回 404** —— 区分开就等于确认这个 id 存在。
+        raise HTTPException(status_code=404, detail="这条回答不存在。") from None
+    return _to_saved_item(record)
+
+
+@router.get("/knowledge", response_model=SavedKnowledgeListResponse, summary="我保存的知识")
+def list_knowledge(
+    limit: int = Query(default=saved_knowledge_service.DEFAULT_LIMIT, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    learner_id: str = Depends(require_learner_id),
+):
+    rows, total = saved_knowledge_service.list_saved(
+        db, learner_id=learner_id, limit=limit, offset=offset
+    )
+    return SavedKnowledgeListResponse(
+        items=[_to_saved_item(r) for r in rows], total=total
     )
 
 

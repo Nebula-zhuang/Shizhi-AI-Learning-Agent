@@ -31,6 +31,7 @@ from app.models.knowledge_relation import KnowledgeRelation  # noqa: E402,F401
 from app.models.learner_kp_state import LearnerKpState  # noqa: E402,F401
 from app.models.learner_profile import LearnerProfile  # noqa: E402,F401
 from app.models.message import Message  # noqa: E402,F401
+from app.models.saved_knowledge import SavedKnowledge  # noqa: E402,F401
 
 # Session 必须在 Message 之前导入：Message 的关系指向 sessions 表，
 # 虽然 SQLAlchemy 用字符串解析，但先注册 Session 能让外键解析更早完成。
@@ -51,5 +52,6 @@ __all__ = [
     "LearnerKpState",
     "LearnerProfile",
     "Message",
+    "SavedKnowledge",
     "Session",
 ]
