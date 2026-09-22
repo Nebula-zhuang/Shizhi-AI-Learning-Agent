@@ -50,6 +50,12 @@ import {
 } from '../../api/study'
 import { stripBlockMarkup, stripInlineMarkup } from '../../lib/plainText'
 import { ProgressiveText, Reveal } from '../../motion/primitives'
+import { useDevMode } from '../../app/DevModeProvider'
+import {
+  emptyListHint,
+  filterConversations,
+  matchSummary,
+} from './conversationSearch'
 import {
   Button,
   EmptyState,
@@ -115,6 +121,17 @@ interface Turn {
 
 export function FreeStudyView() {
   const toast = useToast()
+  /**
+   * 开发者模式。
+   *
+   * 25a §九 明令「不在界面上暴露 Agent / Tool / RAG / Embedding 等内部词」，
+   * §阶段 4 又要求「Developer Mode 才显示 Agent Trace」——
+   * 所以本页有两处内部信息要按它收起：
+   *   · 「它做了什么」（工具调用序列 = Agent Trace）
+   *   · 引用旁边的「经由 MCP / 备用通道」（MCP 是内部词，且属运维信号）
+   * 普通用户不该看到这些；开发者模式下才展开。
+   */
+  const { devMode } = useDevMode()
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
@@ -132,6 +149,20 @@ export function FreeStudyView() {
   const [uploading, setUploading] = useState(false)
   const [dragging, setDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // ── 对话搜索（Phase 4B）
+  // 纯前端过滤：对话列表本来就已全量加载，多一个后端接口只是多一次往返。
+  // ⚠️ 只搜标题，不搜对话正文 —— 界面上也不暗示能搜正文。
+  const [convQuery, setConvQuery] = useState('')
+  const visibleConversations = useMemo(
+    () => filterConversations(conversations, convQuery),
+    [conversations, convQuery],
+  )
+  // 空态文案与计数**只在真的需要时才有内容**（见 conversationSearch.ts 的理由）
+  const hint = loadingHistory ? '' : emptyListHint(convQuery, conversations.length)
+  const searchSummary = loadingHistory
+    ? ''
+    : matchSummary(convQuery, visibleConversations.length, conversations.length)
 
   // ── 保存知识（Phase 3C）
   //
@@ -314,6 +345,9 @@ export function FreeStudyView() {
       setActiveId(created.id)
       setTurns([])
       setDraft('')
+      // 清掉搜索词：新对话标题还叫「新的学习对话」，如果当时正搜着别的词，
+      // 它就会**建好了却看不见** —— 用户会以为新建失败。
+      setConvQuery('')
       inputRef.current?.focus()
     } catch {
       toast.error('没法新建对话', '请稍后再试。')
@@ -488,6 +522,21 @@ export function FreeStudyView() {
           新建学习对话
         </Button>
 
+        {/* 对话搜索。**只在已经有对话时才出现** —— 一条都没有的时候
+            摆一个搜索框，是让人去搜一个注定为空的集合。 */}
+        {!loadingHistory && conversations.length > 0 && (
+          <input
+            value={convQuery}
+            onChange={(e) => setConvQuery(e.target.value)}
+            placeholder="搜对话标题…"
+            aria-label="搜索对话"
+            className="w-full rounded-lg border border-line-strong bg-surface-1 px-2.5 py-1.5 text-xs text-ink-1 outline-none placeholder:text-ink-4 focus:border-moss-line"
+          />
+        )}
+        {searchSummary && (
+          <p className="px-2 text-2xs text-ink-4">{searchSummary}</p>
+        )}
+
         <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
           {loadingHistory && (
             /* 骨架屏而不是"正在读…"文字：文字只说明"在等"，
@@ -502,12 +551,10 @@ export function FreeStudyView() {
               <Skeleton width="52%" height={9} />
             </div>
           )}
-          {!loadingHistory && conversations.length === 0 && (
-            <p className="px-2 py-3 text-2xs leading-relaxed text-ink-4">
-              还没有对话。问第一个问题就会出现在这里。
-            </p>
+          {hint && (
+            <p className="px-2 py-3 text-2xs leading-relaxed text-ink-4">{hint}</p>
           )}
-          {conversations.map((conversation) => (
+          {visibleConversations.map((conversation) => (
             <ConversationRow
               key={conversation.id}
               conversation={conversation}
@@ -582,10 +629,15 @@ export function FreeStudyView() {
             <SourceList turn={latestPanel} />
           </section>
 
-          <section className="rounded-xl border border-line bg-paper-raised p-3">
-            <p className="mb-2 text-xs font-medium text-ink-2">它做了什么</p>
-            <ToolTrail turn={latestPanel} />
-          </section>
+          {/* Agent Trace 只在开发者模式下展开（25a §阶段 4）。
+              普通用户看「参考来源」就够了 —— 工具调用序列是过程细节，
+              而且 `TOOL_LABEL` 之外的新工具会漏出内部名。 */}
+          {devMode && (
+            <section className="rounded-xl border border-line bg-paper-raised p-3">
+              <p className="mb-2 text-xs font-medium text-ink-2">它做了什么</p>
+              <ToolTrail turn={latestPanel} />
+            </section>
+          )}
 
           {/* 已保存的知识是**跨对话**的，所以它不跟 `latestPanel` 走 ——
               放在这里只是借右侧这块地方，与上面两节的性质不同。 */}
@@ -882,8 +934,28 @@ function SaveAction({
  *   · fellBack —— 有没有回退过，以及为什么
  *
  * 只显示 provider 而不显示回退，会让人以为首选通道一直是好的。
+ *
+ * ## 但这里有三类信息，**只有两类该收起**
+ *
+ * | 标注 | 性质 | 谁能看 |
+ * |---|---|---|
+ * | （离线模拟） | **诚实性**：告诉用户这批结果不是真网页 | **所有人** |
+ * | 经由 MCP | 内部词（25a §九 明令不得暴露） | 仅开发者模式 |
+ * | （备用通道） | 运维信号：首选通道没连上 | 仅开发者模式 |
+ *
+ * 「离线模拟」**绝不能跟着一起收起** —— 收起它等于让用户以为
+ * 离线模拟的结果是真联网查来的，那正是项目明令禁止的事。
  */
 function ProviderTag({ citation }: { citation: TurnCitation }) {
+  const { devMode } = useDevMode()
+
+  // 诚实性信息：不论是不是开发者模式都要说
+  if (citation.simulated) {
+    return <span className="ml-1 text-ink-4">（离线模拟）</span>
+  }
+
+  if (!devMode) return null
+
   if (citation.fellBack) {
     return (
       <span className="ml-1 text-sienna-ink" title={citation.fallbackReason || '首选通道没连上'}>
@@ -898,9 +970,6 @@ function ProviderTag({ citation }: { citation: TurnCitation }) {
       </span>
     )
   }
-  if (citation.simulated) {
-    return <span className="ml-1 text-ink-4">（离线模拟）</span>
-  }
   return null
 }
 
@@ -910,6 +979,9 @@ const TOOL_LABEL: Record<string, string> = {
   document_analysis: '在那份资料里找',
   web_search: '联网查了',
   image_analysis: '看了这张图',
+  // 3B 加的工具。**漏了它就会在界面上露出 `search_saved_knowledge` 这个内部名** ——
+  // 兜底文案（'查了一下'）虽然不露内部词，但说不清它干了什么。
+  search_saved_knowledge: '翻了你保存的知识',
 }
 
 /**

@@ -27,6 +27,7 @@ import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 
 import { useAuth } from './AuthProvider'
+import { DevModeProvider } from './DevModeProvider'
 import { useLearning, type View } from './LearningProvider'
 import { DevPanel } from '../components/DevPanel'
 import {
@@ -298,7 +299,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
                 className="flex min-h-0 flex-1 flex-col"
               >
-                {children}
+                {/* 开发者模式**只读广播**给页面：开关的所有权仍在 Shell
+                    （快捷键 + localStorage + `?dev=1` 都在这里），
+                    这一层只让页面知道该不该收起内部信息。 */}
+                <DevModeProvider devAvailable={devAvailable} devMode={devMode}>
+                  {children}
+                </DevModeProvider>
               </motion.div>
             </AnimatePresence>
           </div>
