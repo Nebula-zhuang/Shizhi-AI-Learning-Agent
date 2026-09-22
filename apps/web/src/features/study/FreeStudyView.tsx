@@ -49,6 +49,7 @@ import {
   type TurnSource,
 } from '../../api/study'
 import { stripBlockMarkup, stripInlineMarkup } from '../../lib/plainText'
+import { ProgressiveText, Reveal } from '../../motion/primitives'
 import {
   Button,
   EmptyState,
@@ -59,6 +60,8 @@ import {
   IconSpark,
   IconTrash,
   Skeleton,
+  SuccessMark,
+  Thinking,
   cn,
 } from '../../ui'
 import { useToast } from '../../ui/overlays'
@@ -89,6 +92,14 @@ interface Turn {
    * 落库成功后才有；有了它才能"保存这一轮"（正文由服务端按 id 取）。
    */
   messageId?: number
+  /**
+   * 这条是**打开对话时从历史里读回来的**（不是本轮刚生成的）。
+   *
+   * 只用来决定正文用不用逐段显影：流式刚结束那一刻，正文其实还在原地，
+   * 若此时切成 `ProgressiveText`，它会先隐藏再逐段浮现 ——
+   * 用户看到的是"整段文字闪了一下"。历史消息不存在这个问题（本来就是新出现）。
+   */
+  fromHistory?: boolean
   role: 'user' | 'assistant'
   content: string
   sources: TurnSource[]
@@ -244,6 +255,7 @@ export function FreeStudyView() {
             // ⚠️ 服务端 id 要**单独存进 `messageId`**，不能只藏在 key 里 ——
             // "保存这一轮"凭的是它（正文由服务端按 id 取），藏在字符串里没法用。
             messageId: m.id,
+            fromHistory: true,
             role: m.role,
             content: m.content,
             sources: m.sources ?? [],
@@ -478,7 +490,17 @@ export function FreeStudyView() {
 
         <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
           {loadingHistory && (
-            <p className="px-2 py-3 text-2xs text-ink-4">正在读你的对话…</p>
+            /* 骨架屏而不是"正在读…"文字：文字只说明"在等"，
+               骨架还把**等出来的是什么东西**先摆出来（这一栏放的是对话行）——
+               加载完的瞬间版面不跳。`aria-hidden` 由 Skeleton 自己带。 */
+            <div className="space-y-2 px-2.5 py-2">
+              <Skeleton width="72%" height={11} />
+              <Skeleton width="46%" height={9} />
+              <Skeleton className="mt-3" width="64%" height={11} />
+              <Skeleton width="38%" height={9} />
+              <Skeleton className="mt-3" width="78%" height={11} />
+              <Skeleton width="52%" height={9} />
+            </div>
           )}
           {!loadingHistory && conversations.length === 0 && (
             <p className="px-2 py-3 text-2xs leading-relaxed text-ink-4">
@@ -511,13 +533,18 @@ export function FreeStudyView() {
           ) : (
             <div className="space-y-6">
               {turns.map((turn) => (
-                <TurnBlock
-                  key={turn.key}
-                  turn={turn}
-                  savedMessageIds={savedMessageIds}
-                  savingMessageId={savingMessageId}
-                  onSave={(messageId) => void handleSave(messageId)}
-                />
+                /* 新消息淡入 + 微升。**只在挂载时播一次** ——
+                   流式回答每来一段都会重渲染，但 `Reveal` 的 `animate`
+                   不会重放，所以正文增长时不会有任何"抖一下"。
+                   `Reveal` 内部走 `useMotion()`，已尊重 prefers-reduced-motion。 */
+                <Reveal key={turn.key}>
+                  <TurnBlock
+                    turn={turn}
+                    savedMessageIds={savedMessageIds}
+                    savingMessageId={savingMessageId}
+                    onSave={(messageId) => void handleSave(messageId)}
+                  />
+                </Reveal>
               ))}
             </div>
           )}
@@ -704,14 +731,7 @@ function TurnBlock({
 
   return (
     <div className="space-y-2">
-      {/* 助教的声音用衬线正文，与 Tutor 页面同一套语法 */}
-      <div className="tutor-voice whitespace-pre-wrap">
-        {/* 正文按纯文本渲染，所以模型写的 `**重点**` 要在进界面之前摘掉 */}
-        {stripBlockMarkup(turn.content)}
-        {turn.streaming && (
-          <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-moss align-text-bottom" />
-        )}
-      </div>
+      <AssistantText turn={turn} />
 
       {/* 引用：有来源才出现，没有就不占位置 */}
       {turn.citations.length > 0 && (
@@ -746,6 +766,54 @@ function TurnBlock({
 }
 
 /**
+ * 助手的正文。**三种形态，各有各的道理**：
+ *
+ * 1. **还在等第一个字** → `Thinking`（三点呼吸）。空白等最先几秒最难受，
+ *    这里给一个"确实在动"的信号，而不是让用户盯着一片空。
+ * 2. **正在流式输出** → 纯文本 + 光标。**正文的真增量本身就是动画**，
+ *    再叠一层打字机/显影只会变成两次动画打架（这也是 Tutor 的做法：
+ *    「正文逐字流入（真实增量，不是打字机动画）」）。
+ * 3. **打开对话时读回来的多段回答** → `ProgressiveText` 按段依次显影。
+ *    这时文字是**新出现**的，逐段浮现才有意义（组件注释明说"不是打字机"）。
+ *
+ * ⚠️ 第 3 种**只用于历史消息**（`turn.fromHistory`）。流式刚结束的那条不用 ——
+ * 正文当时还在原地，切成 `ProgressiveText` 会先隐藏再逐段浮现，
+ * 用户看到的是一次"闪一下"。单段回答也仍走纯文本：一段话"依次显影"
+ * 等于整段淡入，白跑一层动画。
+ *
+ * ⚠️ 正文一律**纯文本**：模型写的 `**重点**` 在进界面之前就摘掉。
+ * FreeStudy 刻意不接 Markdown 渲染器（见 `docs/13` 的既有决定）。
+ */
+function AssistantText({ turn }: { turn: Turn }) {
+  const text = stripBlockMarkup(turn.content)
+
+  if (turn.streaming && !text.trim()) {
+    return <Thinking label="正在组织回答…" />
+  }
+
+  const paragraphs = text.split(/\n{2,}/).filter((part) => part.trim())
+
+  if (turn.fromHistory && !turn.streaming && paragraphs.length > 1) {
+    return (
+      <ProgressiveText
+        className="tutor-voice"
+        lines={paragraphs}
+        render={(line) => <p className="whitespace-pre-wrap">{line}</p>}
+      />
+    )
+  }
+
+  return (
+    <div className="tutor-voice whitespace-pre-wrap">
+      {text}
+      {turn.streaming && (
+        <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-moss align-text-bottom" />
+      )}
+    </div>
+  )
+}
+
+/**
  * 「保存知识」入口。
  *
  * 三条规矩（都在 `savedKnowledge.ts` 里，这里只负责画）：
@@ -774,6 +842,16 @@ function SaveAction({
   const saving = savingMessageId !== null && savingMessageId === turn.messageId
   const done = eligibility.reason === 'already-saved'
 
+  // 存好了就**不再是一个按钮**：换成描边勾 + 「已保存」。
+  // 按钮留在那儿（哪怕是灰的）会一直勾人去点第二次。
+  if (done) {
+    return (
+      <div className="flex items-center gap-2">
+        <SuccessMark label="已保存" />
+      </div>
+    )
+  }
+
   return (
     <div className="flex items-center gap-2">
       <button
@@ -786,9 +864,7 @@ function SaveAction({
         }}
         className={cn(
           'meta inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors',
-          done
-            ? 'cursor-default text-moss-ink'
-            : 'text-ink-4 hover:bg-paper-sunken hover:text-ink-1 disabled:cursor-not-allowed disabled:opacity-50',
+          'text-ink-4 hover:bg-paper-sunken hover:text-ink-1 disabled:cursor-not-allowed disabled:opacity-50',
         )}
       >
         <IconBookmark size={11} />
