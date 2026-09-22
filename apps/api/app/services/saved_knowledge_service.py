@@ -30,14 +30,17 @@ Phase 3A 刻意**不动 `retrieve_knowledge` 的语义**，所以这里用独立
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.conversation import Conversation, ConversationMessage, MessageAuthor
 from app.models.saved_knowledge import SavedKnowledge
-from app.rag.embedding import EmbeddingError, EmbeddingProvider
+from app.rag.embedding import EmbeddingProvider
 from app.rag.embedding import embedder as default_embedder
 from app.rag.vectorstore import VectorStore, vector_store as default_store
 
@@ -298,3 +301,156 @@ def list_saved(
         .offset(start)
     )
     return list(db.scalars(stmt).all()), total
+
+
+# --------------------------------------------------------------------------- #
+# 跨对话检索（Phase 3B）
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class SavedKnowledgeHit:
+    """一条命中的保存知识。"""
+
+    saved_id: int
+    question: str
+    answer: str
+    tags: list[str] | None
+    distance: float
+    created_at: datetime | None = None
+    source_message_id: int | None = None
+
+
+async def search_saved(
+    db: Session,
+    *,
+    learner_id: str,
+    query: str,
+    top_k: int | None = None,
+    provider: EmbeddingProvider | None = None,
+    store: VectorStore | None = None,
+    max_distance: float | None = None,
+) -> list[SavedKnowledgeHit]:
+    """在**我保存的知识**里做跨对话检索。
+
+    这就是设计文档里那句「我以前学过 JVM 吗」。
+
+    ## 两道隔离，缺一不可
+
+    1. **向量层**：`where={"learner_id": ...}` 只在自己的向量里找。
+    2. **DB 层**：拿到 `saved_id` 后**再按 `learner_id` 查一遍**，
+       查不到的直接丢弃。
+
+    只靠第 1 道是不够的：向量 metadata 是**写入时**的快照，
+    一旦有人写错（或历史数据有偏差），越权就是静默发生的 ——
+    而第 2 道把最终裁决权交回**有唯一键约束的数据库**。
+    两层都过的才是能展示给用户的东西。
+
+    ## 为什么不能复用 `rag_service.retrieve_knowledge`
+
+    那个函数的元数据解析是**按 chunk 写死**的（`document_id` / `chunk_index` /
+    `page_start` / `file_name`）。保存的知识没有这些字段，
+    硬套会得到一堆空值，还会把两类来源混在同一套"溯源"上 ——
+    而它们本来该被区分开（见模块开头）。
+    这里只复用它的**两件基础设施**：embedding provider 与 vectorstore。
+    """
+    text = (query or "").strip()
+    if not text:
+        return []
+
+    embed = provider or default_embedder
+    vectors = store or default_store
+    limit = int(top_k or settings.rag_top_k)
+    # 与资料检索用**同一个门槛**，不新造一套相似度标准
+    threshold = settings.rag_max_distance if max_distance is None else max_distance
+
+    embedded = await embed.embed([text])
+    if not embedded.vectors:
+        return []
+
+    hits = vectors.query(
+        embedded.vectors[0],
+        top_k=limit,
+        where={"learner_id": learner_id},
+        name=saved_collection_name(vectors),
+    )
+    if not hits:
+        return []
+
+    # 第 2 道：拿回 DB 复核归属（并顺便取回正文的最新副本）
+    ids: list[int] = []
+    distances: dict[int, float] = {}
+    for hit in hits:
+        meta = hit.get("metadata") or {}
+        try:
+            saved_id = int(meta.get("saved_id"))
+        except (TypeError, ValueError):
+            continue  # metadata 里没有 id 的脏数据，直接跳过
+        distance = hit.get("distance")
+        distances[saved_id] = float(distance) if distance is not None else 1.0
+        ids.append(saved_id)
+
+    if not ids:
+        return []
+
+    stmt = (
+        select(SavedKnowledge)
+        .where(
+            SavedKnowledge.id.in_(ids),
+            SavedKnowledge.learner_id == learner_id,  # ← 归属复核
+        )
+    )
+    rows = {int(r.id): r for r in db.scalars(stmt).all()}
+
+    results: list[SavedKnowledgeHit] = []
+    for saved_id in ids:
+        row = rows.get(saved_id)
+        if row is None:
+            logger.warning("保存知识 %s 的归属复核未通过，已丢弃。", saved_id)
+            continue
+        if distances[saved_id] > threshold:
+            continue  # 相似度不足，不该进提示词
+        results.append(
+            SavedKnowledgeHit(
+                saved_id=saved_id,
+                question=row.question,
+                answer=row.answer,
+                tags=list(row.tags) if row.tags else None,
+                distance=distances[saved_id],
+                created_at=row.created_at,
+                source_message_id=row.source_message_id,
+            )
+        )
+
+    results.sort(key=lambda h: h.distance)
+    return results[:limit]
+
+
+def reindex_missing(
+    db: Session,
+    *,
+    learner_id: str,
+    limit: int = 50,
+    provider: EmbeddingProvider | None = None,
+    store: VectorStore | None = None,
+) -> int:
+    """给 `embedding_id` 为空的记录补建索引，返回补成功的条数。
+
+    为什么需要它：保存时写向量失败是**刻意不回滚**的（见 `_try_index`），
+    那条记录于是"存下来了但搜不到"。这个方法就是兑现当时那句"可以事后回填"——
+    没有它，那个设计就只是把问题搁置了。
+
+    同步函数（不 embed 之外的 IO），供管理脚本或后续的维护任务调用。
+    """
+    stmt = (
+        select(SavedKnowledge)
+        .where(
+            SavedKnowledge.learner_id == learner_id,
+            SavedKnowledge.embedding_id.is_(None),
+        )
+        .order_by(SavedKnowledge.id.asc())
+        .limit(max(1, int(limit)))
+    )
+    fixed = 0
+    for record in db.scalars(stmt).all():
+        if _try_index(db, record, provider=provider, store=store):
+            fixed += 1
+    return fixed

@@ -46,6 +46,7 @@ from app.agent.tool_specs import register_all
 from app.agent.tools.registry import ToolRunner
 from app.agent.tools.specs import ToolRegistry, ToolResult
 from app.core.config import settings
+from app.core.identity import DEFAULT_LEARNER_ID
 from app.core.llm import Message, llm_gateway
 from app.core.logging import get_logger
 
@@ -413,16 +414,24 @@ def _make_generator(*, history: Sequence[dict[str, str]]):
 # --------------------------------------------------------------------------- #
 # 一轮
 # --------------------------------------------------------------------------- #
-def build_registry(*, images: Sequence[str] = (), user_question: str = "") -> ToolRegistry:
+def build_registry(
+    *,
+    images: Sequence[str] = (),
+    user_question: str = "",
+    learner_id: str = DEFAULT_LEARNER_ID,
+) -> ToolRegistry:
     """构造一个装好工具的表。
 
     每次新建而不是复用全局单例：工具的可用性依赖运行期配置
     （比如测试里要模拟"没联网"），共享一份会让测试之间互相污染。
 
     `images` 是本轮附带的图片，会绑定进 `image_analysis`（见 `register_all`）。
+    `learner_id` 会绑定进 `search_saved_knowledge` —— 跨对话检索必须知道是谁。
     """
     registry = ToolRegistry()
-    register_all(registry, images=images, user_question=user_question)
+    register_all(
+        registry, images=images, user_question=user_question, learner_id=learner_id
+    )
     return registry
 
 
@@ -442,6 +451,7 @@ async def stream_turn(
     images: Sequence[str] = (),
     kb_size: int = 0,
     has_attachments: bool = False,
+    learner_id: str = DEFAULT_LEARNER_ID,
     provider: Any = None,
     allow_web: bool = True,
     registry: ToolRegistry | None = None,
@@ -468,7 +478,9 @@ async def stream_turn(
 
     # **本轮的图片要绑定进工具** —— 这样模型调 image_analysis 时
     # 只需要说"我想知道什么"，不需要知道图片在哪。
-    tool_registry = registry or build_registry(images=images, user_question=question)
+    tool_registry = registry or build_registry(
+        images=images, user_question=question, learner_id=learner_id
+    )
 
     # ── 时钟问题：**在进循环之前就把真实时间放进观察里**
     #

@@ -379,6 +379,9 @@ async def ask(
                 images=image_paths,
                 kb_size=kb_size,
                 has_attachments=bool(attachments),
+                # 跨对话检索要按人隔离 —— 绑定进 `search_saved_knowledge`，
+                # 模型给不出、也不该给这个值。
+                learner_id=learner_id,
                 allow_web=True,
             ):
                 if event.event == "delta":

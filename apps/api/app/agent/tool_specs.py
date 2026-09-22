@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from app.agent.tools.registry import DEFAULT_TOOL_TIMEOUT
 from app.core.config import settings
+from app.core.identity import DEFAULT_LEARNER_ID
 from app.core.llm import LLMError, llm_gateway, message_text, user_message, vision_gateway
 from app.core.logging import get_logger
 from app.ingestion import storage
@@ -435,14 +436,128 @@ async def current_time(**_ignored: Any) -> "ToolResultLike":
     )
 
 
+# --------------------------------------------------------------------------- #
+# ⑥ search_saved_knowledge（Phase 3B）
+# --------------------------------------------------------------------------- #
+async def search_saved_knowledge(
+    query: str,
+    *,
+    learner_id: str = DEFAULT_LEARNER_ID,
+    session_factory: Callable[[], Any] | None = None,
+    provider: Any = None,
+    store: Any = None,
+    top_k: int | None = None,
+    **_ignored: Any,
+) -> "ToolResultLike":
+    """在**用户自己保存的知识**里做跨对话检索。
+
+    ⚠️ 与 `retrieve_knowledge` 是**两件事**，刻意不合并：
+
+    | | `retrieve_knowledge` | 这里 |
+    |---|---|---|
+    | 找的是什么 | 用户**上传的资料**（PDF / 讲义）的片段 | 用户**主动保存**的问答 |
+    | 数据来源 | `chunks` + 资料向量集合 | `saved_knowledge` + 独立集合 |
+    | 什么时候用 | "我那份讲义里怎么说的" | "我以前学过 JVM 吗" |
+
+    合并的后果：模型无法在回答里区分这两类来源，
+    而项目的引用优先级规则（用户资料 > 联网证据 > 模型通识）要求它们**各自可辨**。
+
+    `learner_id` 由注册时 `partial` 绑定 —— 和 `image_analysis` 绑定图片路径同理：
+    **模型不该、也没法提供它**。否则一次精心构造的调用就能读到别人的知识库。
+    """
+    from app.agent.tools.specs import ToolResult
+    from app.db.session import SessionLocal
+    from app.services import saved_knowledge_service
+
+    text = (query or "").strip()
+    if not text:
+        return ToolResult(ok=False, content="检索词是空的。", error="empty_query")
+
+    factory = session_factory or SessionLocal
+    try:
+        # 工具内开一个**短生命周期**的 session：不把连接穿过整个 Agent 循环
+        # （那会让一次多步编排始终占着一个事务不放）。
+        with factory() as db:
+            hits = await saved_knowledge_service.search_saved(
+                db,
+                learner_id=learner_id,
+                query=text,
+                top_k=top_k,
+                provider=provider,
+                store=store,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # 失败要**如实告诉模型**，它才能决定"换个说法"还是"直接回答"。
+        logger.warning("search_saved_knowledge 失败：%s", exc)
+        return ToolResult(
+            ok=False,
+            content=f"检索你保存的知识时出错了：{exc}。可以换个说法再试，或者直接回答。",
+            error=f"saved_search_failed: {exc}",
+            retryable=True,
+        )
+
+    if not hits:
+        return ToolResult(
+            ok=True,
+            content=(
+                "**在你保存的知识里没有找到相关内容。**"
+                "这说明他此前没有保存过这方面的东西 —— 请如实说明。"
+                "⚠️ 但这**不等于**「你的资料里没有」：那是另一个工具的事，别混为一谈。"
+            ),
+            display={"kind": "saved_knowledge", "count": 0},
+        )
+
+    blocks: list[str] = []
+    for position, hit in enumerate(hits, start=1):
+        when = hit.created_at.strftime("%Y-%m-%d") if hit.created_at else "未知时间"
+        tag_text = f"｜标签：{'、'.join(hit.tags)}" if hit.tags else ""
+        blocks.append(
+            f"[{position}] 保存于 {when}{tag_text}\n"
+            f"当时问的是：{hit.question.strip()}\n"
+            f"当时答的是：{hit.answer.strip()}"
+        )
+
+    return ToolResult(
+        ok=True,
+        content=(
+            "## 用户自己保存过的相关知识\n\n"
+            + "\n\n".join(blocks)
+            + "\n\n（这些是他**主动留下**的内容，不是他上传的资料。"
+            "引用时请说「你之前保存过」，不要说成「你的资料里写着」。）"
+        ),
+        display={
+            "kind": "saved_knowledge",
+            "count": len(hits),
+            "preview": hits[0].answer[:160],
+            "question": hits[0].question[:120],
+        },
+        citations=[
+            {
+                "kind": "saved_knowledge",
+                "saved_id": hit.saved_id,
+                "question": hit.question[:120],
+                "created_at": hit.created_at.isoformat() if hit.created_at else None,
+            }
+            for hit in hits
+        ],
+    )
+
+
 def register_all(
-    registry, *, images: Sequence[str] = (), user_question: str = ""
+    registry,
+    *,
+    images: Sequence[str] = (),
+    user_question: str = "",
+    learner_id: str = DEFAULT_LEARNER_ID,
 ) -> None:
     """把工具注册进给定的注册表。
 
     `images` 是本轮对话附带的图片（路径或 data URI）。**它们会被绑定进
     `image_analysis`** —— 模型不需要、也不可能知道图片路径，
     它只需要说"关于这张图我想知道什么"。
+
+    `learner_id` 同理被绑定进 `search_saved_knowledge`：
+    检索"我保存的知识"必须知道**是谁**，而模型提供的任何身份都不可信。
 
     幂等：重复调用不会重复注册（`register` 会抛"名字重复"，
     所以这里先检查一下 —— 测试里会反复构造注册表）。
@@ -578,6 +693,33 @@ def register_all(
             #: **不占用户的工具调用额度** —— 本地读，零外部成本、幂等、瞬时。
             #: 让它跟联网搜索抢那 3 次配额没有道理。
             counted=False,
+        )
+    )
+
+    # ⑥ 跨对话检索：在**用户主动保存的知识**里找。
+    #    `learner_id` 在这里绑定 —— 模型给不出、也不该给。
+    specs.append(
+        ToolSpec(
+            name="search_saved_knowledge",
+            description=(
+                "在**用户自己保存过的知识**里检索。"
+                "当问题指向「他以前学过/留过什么」时用它 —— "
+                "例如「我以前学过 JVM 吗」「我之前保存过虚拟线程的东西吗」"
+                "「帮我翻翻我存过的笔记」。\n"
+                "⚠️ **不要**用它替代资料检索：它找的是用户**主动保存的那几轮问答**，"
+                "不是他上传的 PDF / 讲义。若问的是「我的资料里怎么说的」，"
+                "该用 `retrieve_knowledge`。\n"
+                "⚠️ 也不要因为「问题是个知识概念」就调它 —— 没有指向他保存内容的问题应当直接回答。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索词，用问句或关键词都行"},
+                },
+                "required": ["query"],
+            },
+            handler=partial(search_saved_knowledge, learner_id=learner_id),
+            counted=True,
         )
     )
 

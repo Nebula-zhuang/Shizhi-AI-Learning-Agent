@@ -232,6 +232,9 @@ def test_registry_has_the_expected_tools() -> None:
         "image_analysis",
         # 2.1 新增：时钟问题不能再靠模型记忆
         "current_time",
+        # 3B 新增：在**用户主动保存的知识**里跨对话检索。
+        # 与 retrieve_knowledge 是两件事（上传的资料 vs 主动保存的内容），刻意分开。
+        "search_saved_knowledge",
     }
 
 
@@ -350,8 +353,9 @@ def test_registry_lists_all_tools_regardless_of_availability() -> None:
     但它们仍然是"我们注册过的能力"，该在自检接口里如实列出。
     """
     registry = free_study.build_registry()
-    assert len(registry.names()) == 5
-    assert len(registry.available_names()) <= 5
+    # 3B 从 5 个增到 6 个（多了 search_saved_knowledge）
+    assert len(registry.names()) == 6
+    assert len(registry.available_names()) <= 6
 
 
 # =========================================================================== #
