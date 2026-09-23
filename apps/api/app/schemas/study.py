@@ -124,3 +124,31 @@ class AttachmentOption(BaseModel):
 
 class AttachmentListResponse(BaseModel):
     items: list[AttachmentOption]
+
+
+# --------------------------------------------------------------------------- #
+# 学习主题 → 知识点（5C-2）
+# --------------------------------------------------------------------------- #
+class LearnTargetRequest(BaseModel):
+    """把"想学 X"里的主题解析成一个已有知识点。"""
+
+    topic: str = Field(min_length=1, max_length=120)
+
+
+class LearnTargetResponse(BaseModel):
+    """"想学 X" → 知识点 的解析结果。
+
+    ⚠️ **没匹配上时 `kp_id` 是 `None`，而不是随便给一个 id。**
+    下一步会拿这个 id 去开一轮真实教学；编一个出来只会让用户
+    在一个完全无关的知识点里被问第一个问题。
+    """
+
+    matched: bool
+    #: 匹配到的知识点 id；没匹配上为 None
+    kp_id: int | None = None
+    title: str = ""
+    document_id: int | None = None
+    #: **机器码**，不是给用户看的文案：`exact` / `normalized` / `contained`
+    #: / `none`（压根没匹配上）/ `ambiguous`（有多个候选，不替用户挑）。
+    #: 文案由前端按这个码决定（后端字段不许直接拼进界面）。
+    reason: str

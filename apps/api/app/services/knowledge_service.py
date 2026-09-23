@@ -22,11 +22,15 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.llm import LLMGateway, llm_gateway
 from app.core.logging import get_logger
 from app.models.chunk import BlockType, Chunk
+from app.models.document import Document, ParseStatus
+from app.models.knowledge_point import KnowledgePoint
 
 logger = get_logger(__name__)
 
@@ -132,6 +136,117 @@ def normalize_title(title: str, *, max_len: int = 200) -> str:
     text = _PUNCT.sub("", text)
     text = _STOPWORDS.sub("", text)
     return text[:max_len]
+
+
+# --------------------------------------------------------------------------- #
+# 学习主题 → 知识点（5C-2：自由学习里"想学 X"跳去辅导）
+# --------------------------------------------------------------------------- #
+#: 太短的主题不做包含匹配（一两个字几乎能命中任何东西）。
+CONTAIN_TOPIC_MIN_CHARS = 3
+
+#: 太短的标题也不作为包含匹配的目标（一个字的"知识点"不是可以去学的东西）。
+CONTAIN_TITLE_MIN_CHARS = 2
+
+
+@dataclass(frozen=True)
+class LearnTarget:
+    """把"想学 X"解析到具体知识点的结果。"""
+
+    #: 匹配到的知识点 id；没匹配上就是 None（**绝不编一个出来**）
+    kp_id: int | None
+    title: str
+    document_id: int | None
+    #: 机器码，给前端决定文案用；**不是给用户看的**（`exact`/`normalized`/`contained`/`none`/`ambiguous`）
+    reason: str
+
+    @property
+    def matched(self) -> bool:
+        return self.kp_id is not None
+
+
+def _learn_target_candidates(db: Session, *, learner_id: str) -> list[KnowledgePoint]:
+    """这位学习者**自己资料里**的全部知识点。
+
+    归属沿 `knowledge_points.document_id → documents.owner_learner_id` 判定 ——
+    与 `deps.require_knowledge_point` 同一套规则。**不加这一层，匹配会从别人的
+    资料里挑出知识点**，而下一步就是拿它去开一轮教学（最严重的一类越权）。
+    """
+    owned = select(Document.id).where(
+        Document.owner_learner_id == learner_id,
+        Document.parse_status == ParseStatus.READY,
+    )
+    stmt = select(KnowledgePoint).where(KnowledgePoint.document_id.in_(owned))
+    return list(db.scalars(stmt).all())
+
+
+def find_learn_target(db: Session, *, topic: str, learner_id: str) -> LearnTarget:
+    """把学习主题解析成一个已有知识点。**匹配不到就如实说匹配不到。**
+
+    三级，逐级放宽，**每级都必须唯一**：
+
+    | 级别 | 判据 | 理由 |
+    |---|---|---|
+    | `exact` | 标题**原样**相等 | 最可靠，用户就是照着标题说的 |
+    | `normalized` | `normalize_title` 后相等 | 复用入库时的同一套归一化（标点/大小写/虚词）|
+    | `contained` | 标题被主题**包含**（主题更具体） | 兜底，**方向本身即为护栏**（见下）|
+
+    ⚠️ **每一级都要求候选唯一**：同名/多候选一律返回 `ambiguous`，让用户自己去挑。
+    跳错知识点比不跳更糟 —— 用户会在一门完全没想学的课里被问第一个问题。
+
+    ## 包含匹配为什么**只认一个方向**
+
+    允许：`标题 ⊆ 主题`（主题更具体）。例：「Java 线程」→ 标题「线程」，
+    多出来的「Java」是个限定词，落到「线程」是对的。
+
+    拒绝：`主题 ⊂ 标题`（主题更短）。例：「进程」→ 标题「进程与线程」✗
+    —— **这正是文件开头那条 P1 结论点名的形状**（「包含关系极易过度合并」）。
+    那条结论针对的是入库时合并（破坏性）；这里是跳转时定位（非破坏性），
+    但危险的形状是同一种，所以照挡。
+
+    → **方向就是护栏**，不需要再叠一层长度比：反向的情形一律不匹配。
+    """
+    text = (topic or "").strip()
+    if not text:
+        return LearnTarget(None, "", None, "none")
+
+    candidates = _learn_target_candidates(db, learner_id=learner_id)
+
+    # ① 原样相等（**同样要求唯一** —— 两条同名时不能任选一条）
+    exact = [p for p in candidates if p.title == text]
+    if len(exact) == 1:
+        point = exact[0]
+        return LearnTarget(point.id, point.title, point.document_id, "exact")
+    if len(exact) > 1:
+        return LearnTarget(None, "", None, "ambiguous")
+
+    # ② 归一化后相等（复用入库同款 `normalize_title`）
+    wanted = normalize_title(text)
+    if wanted:
+        hits = [p for p in candidates if p.title_norm == wanted]
+        if len(hits) == 1:
+            point = hits[0]
+            return LearnTarget(point.id, point.title, point.document_id, "normalized")
+        if len(hits) > 1:
+            # 不同资料里存在同名的点 —— 让用户自己去选，别替他挑
+            return LearnTarget(None, "", None, "ambiguous")
+
+    # ③ 包含：**只认「标题 ⊆ 主题」**（主题更具体），且候选唯一
+    if len(wanted) >= CONTAIN_TOPIC_MIN_CHARS:
+        contained = [
+            p
+            for p in candidates
+            if p.title_norm
+            and len(p.title_norm) >= CONTAIN_TITLE_MIN_CHARS
+            and p.title_norm in wanted
+        ]
+        if len(contained) == 1:
+            point = contained[0]
+            return LearnTarget(point.id, point.title, point.document_id, "contained")
+        if len(contained) > 1:
+            return LearnTarget(None, "", None, "ambiguous")
+
+    return LearnTarget(None, "", None, "none")
+
 
 
 def merge_duplicates(records: Sequence[KPRecord]) -> list[KPRecord]:

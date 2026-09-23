@@ -43,6 +43,8 @@ from app.schemas.study import (
     ConversationListResponse,
     ConversationRename,
     ConversationSummary,
+    LearnTargetRequest,
+    LearnTargetResponse,
     MessageItem,
     MessageListResponse,
 )
@@ -52,6 +54,7 @@ from app.ingestion.router import validate_upload
 from app.services import (
     document_service,
     ingest_runner,
+    knowledge_service,
     memory_service,
     saved_knowledge_service,
     study_service,
@@ -455,6 +458,44 @@ async def ask(
         event_source(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 学习主题 → 知识点（5C-2）
+# --------------------------------------------------------------------------- #
+@router.post(
+    "/learn-target",
+    response_model=LearnTargetResponse,
+    summary="把「想学 X」解析成已有知识点",
+)
+def resolve_learn_target(
+    payload: LearnTargetRequest,
+    db: Session = Depends(get_db),
+    # ⚠️ 用 `require_learner_id` 而不是 `current_learner_id`：后者未登录会回退到
+    # demo 的 `local`，而这个端点读的是"**我的**资料里的知识点"，
+    # 紧接着还要拿它去开一轮真实教学 —— 与同文件其他端点保持同一把门。
+    learner_id: str = Depends(require_learner_id),
+) -> LearnTargetResponse:
+    """把自由学习里识别出的**学习主题**，解析成这位学习者**自己资料里**的知识点。
+
+    只做解析，**不开会话、不写任何状态** —— 拿到 kp_id 之后由前端调
+    `LearningProvider.startLearning(focus)`，那条路与在「辅导」页挑一个点完全一致。
+
+    ⚠️ **匹配不到就如实返回 `matched=false`**（`kp_id` 为 None），
+    绝不编一个 id 出来 —— 下一步会拿它去开一轮真实教学，
+    用户会在一门完全没想学的课里被问第一个问题。
+
+    ⚠️ 匹配范围**限定在自己 READY 的资料**里（见 `find_learn_target`），
+    否则会从别人的资料里挑出知识点，而紧接着就是一次真实教学。
+    """
+    target = knowledge_service.find_learn_target(db, topic=payload.topic, learner_id=learner_id)
+    return LearnTargetResponse(
+        matched=target.matched,
+        kp_id=target.kp_id,
+        title=target.title,
+        document_id=target.document_id,
+        reason=target.reason,
     )
 
 

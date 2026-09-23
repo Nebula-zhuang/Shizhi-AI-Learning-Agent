@@ -37,6 +37,7 @@ import {
   listMessages,
   listSavedKnowledge,
   renameConversation,
+  resolveLearnTarget,
   saveKnowledge,
   uploadAttachment,
   type AttachmentUpload,
@@ -54,6 +55,7 @@ import { ProgressiveText, Reveal } from '../../motion/primitives'
 import { useDevMode } from '../../app/DevModeProvider'
 import { useLearning } from '../../app/LearningProvider'
 import { continuePrompt, learnProposalCard } from './learnProposal'
+import { PICKER_LABEL, learnOutcome, stayHint, type LearnOutcome } from './learnTarget'
 import {
   emptyListHint,
   filterConversations,
@@ -142,14 +144,13 @@ export function FreeStudyView() {
    */
   const { devMode } = useDevMode()
   /**
-   * 「开始学习」要跳到「辅导」页。
+   * 「辅导」页的入口。
    *
-   * ⚠️ 这里只切视图、**不调 `startLearning(focus)`** —— 那个 API 需要一个
-   * 已有的知识点 id，而"想学 Java 线程"里的主题**还没被解析成知识点**
-   * （topic→知识点 的匹配不在 5C-1 范围内）。切过去之后，
-   * 辅导页自己的选点器会让用户挑一个具体的点开始 —— 这条路不需要 kpId。
+   * `startLearning(focus)` 是**唯一的开教学入口**（会带着 kpId 发起第一轮）。
+   * `setView('learn')` 只切视图、不开会话 —— 用在**降级**那条路上：
+   * 解析不到知识点时把用户送到辅导页的知识点选择器，交给他自己挑。
    */
-  const { setView } = useLearning()
+  const { setView, startLearning } = useLearning()
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
@@ -285,11 +286,25 @@ export function FreeStudyView() {
     inputRef.current?.focus()
   }, [])
 
-  // 「开始学习」跳到「辅导」：只切视图，由辅导页的选点器决定从哪个知识点开始
-  // （见 `useLearning` 那段的说明 —— 主题还没被解析成知识点）。
-  const handleStartLearning = useCallback(() => {
-    setView('learn')
-  }, [setView])
+  // 「开始学习」：**先把主题解析成已有知识点**，再走与「辅导」页完全相同的入口。
+  //
+  // ⚠️ 解析失败（或结果不可信）时**什么都不启动** ——
+  // `startLearning` 会立刻发起一轮真实教学，拿一个不可信的 id 去调，
+  // 用户会在一门完全没想学的课里被问第一个问题。降级文案交给调用方展示。
+  const handleStartLearning = useCallback(
+    async (suggestion: LearnSuggestion): Promise<LearnOutcome> => {
+      try {
+        const result = await resolveLearnTarget(suggestion.topic)
+        const outcome = learnOutcome(result)
+        if (outcome.kind === 'go') await startLearning(outcome.focus)
+        return outcome
+      } catch {
+        // 解析接口本身挂了也不能开教学 —— 同样降级
+        return { kind: 'stay', hint: stayHint('none') }
+      }
+    },
+    [startLearning],
+  )
 
   // ── 新消息进来后滚到底部
   useEffect(() => {
@@ -631,6 +646,7 @@ export function FreeStudyView() {
                     onSave={(messageId) => void handleSave(messageId)}
                     onKeepLearning={handleKeepLearning}
                     onStartLearning={handleStartLearning}
+                    onOpenPicker={() => setView('learn')}
                   />
                 </Reveal>
               ))}
@@ -798,13 +814,15 @@ function TurnBlock({
   onSave,
   onKeepLearning,
   onStartLearning,
+  onOpenPicker,
 }: {
   turn: Turn
   savedMessageIds: ReadonlySet<number>
   savingMessageId: number | null
   onSave: (messageId: number) => void
   onKeepLearning: (suggestion: LearnSuggestion) => void
-  onStartLearning: () => void
+  onStartLearning: (suggestion: LearnSuggestion) => Promise<LearnOutcome>
+  onOpenPicker: () => void
 }) {
   if (turn.role === 'user') {
     return (
@@ -856,6 +874,7 @@ function TurnBlock({
         suggestion={turn.learnSuggestion}
         onKeep={onKeepLearning}
         onStart={onStartLearning}
+        onOpenPicker={onOpenPicker}
       />
 
       <SaveAction
@@ -930,13 +949,40 @@ function LearnProposal({
   suggestion,
   onKeep,
   onStart,
+  onOpenPicker,
 }: {
   suggestion: LearnSuggestion | undefined
   onKeep: (suggestion: LearnSuggestion) => void
-  onStart: () => void
+  /** 解析主题 → 开教学（或降级）。返回值决定卡片切不切到降级态。 */
+  onStart: (suggestion: LearnSuggestion) => Promise<LearnOutcome>
+  /** 降级那条路上"去辅导自己挑"——**只切视图，不开会话** */
+  onOpenPicker: () => void
 }) {
   const card = learnProposalCard(suggestion)
+  /** 匹配失败后的降级文案；null 表示还没试过。 */
+  const [fallback, setFallback] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
   if (!card || !suggestion) return null
+
+  // ── 降级态：解析不到知识点。
+  //    给两个**并列**的出路口，而不是只丢一句错误 ——
+  //    用户此刻想知道的是"那我接下来能干嘛"。
+  if (fallback) {
+    return (
+      <div className="rounded-xl border border-line-strong bg-paper-sunken px-3.5 py-3">
+        <p className="text-2xs leading-relaxed text-ink-3">{fallback}</p>
+        <div className="mt-2.5 flex flex-wrap gap-2">
+          <Button variant="primary" size="sm" onClick={onOpenPicker}>
+            {PICKER_LABEL}
+          </Button>
+          <Button variant="quiet" size="sm" onClick={() => setFallback(null)}>
+            继续自由学习
+          </Button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-xl border border-moss-line bg-moss-soft/40 px-3.5 py-3">
@@ -946,10 +992,22 @@ function LearnProposal({
       </p>
       <p className="mt-1 text-2xs leading-relaxed text-ink-3">{card.description}</p>
       <div className="mt-2.5 flex flex-wrap gap-2">
-        <Button variant="primary" size="sm" onClick={onStart}>
-          {card.startLabel}
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true)
+            void onStart(suggestion).then((outcome) => {
+              setBusy(false)
+              // 成功那条路会切走视图，卡片自然卸载；只有降级要留在这里
+              if (outcome.kind === 'stay') setFallback(outcome.hint)
+            })
+          }}
+        >
+          {busy ? '正在找…' : card.startLabel}
         </Button>
-        <Button variant="quiet" size="sm" onClick={() => onKeep(suggestion)}>
+        <Button variant="quiet" size="sm" disabled={busy} onClick={() => onKeep(suggestion)}>
           {card.keepLabel}
         </Button>
       </div>

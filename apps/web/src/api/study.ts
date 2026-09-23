@@ -237,6 +237,35 @@ export function listSavedKnowledge(limit = 20, offset = 0): Promise<SavedKnowled
   return getJson<SavedKnowledgeList>(`/api/study/knowledge?${query.toString()}`)
 }
 
+// --------------------------------------------------------------------------- //
+// 学习主题 → 知识点（5C-2）
+// --------------------------------------------------------------------------- //
+/**
+ * 后端把主题解析成已有知识点的结果。
+ *
+ * ⚠️ **`matched` 为 false 时 `kp_id` 一定是 null** —— 后端不会编一个 id 出来。
+ * 前端也必须照此办理：拿不到 id 就**不要去开教学**（那条路会走进一个
+ * 完全无关的知识点）。判断逻辑见 `features/study/learnTarget.ts`。
+ */
+export interface LearnTargetResponse {
+  matched: boolean
+  kp_id: number | null
+  title: string
+  document_id: number | null
+  /** 机器码：`exact` / `normalized` / `contained` / `none` / `ambiguous` */
+  reason: string
+}
+
+/**
+ * 把"想学 X"的主题解析成一个已有知识点。
+ *
+ * 只做解析，**不写任何状态、不开会话** —— 拿到 kpId 之后由调用方
+ * 走 `LearningProvider.startLearning(focus)`，与在「辅导」页亲手挑一个点完全同一条路。
+ */
+export function resolveLearnTarget(topic: string): Promise<LearnTargetResponse> {
+  return postJson<LearnTargetResponse>('/api/study/learn-target', { topic })
+}
+
 /**
  * PATCH 的封装。
  *

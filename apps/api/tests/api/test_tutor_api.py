@@ -329,6 +329,8 @@ def test_existing_routes_still_registered() -> None:
         "/api/study/capabilities",
         # Phase 3A 保存知识。同样加进守护列表，而不是只改总数。
         "/api/study/knowledge",
+        # Phase 5C-2 学习主题 → 知识点。同上，加进守护列表。
+        "/api/study/learn-target",
     ):
         assert required in paths, f"既有接口缺失：{required}"
     # P6 新增 2 个流式入口（/api/tutor/start/stream、/api/tutor/answer/stream）——
@@ -340,4 +342,7 @@ def test_existing_routes_still_registered() -> None:
     # 同样是**只增不改**：上面那些既有接口一个没动。
     # Phase 3A 新增 1 个路径（/api/study/knowledge —— POST 保存与 GET 列出共用同一路径）。
     # 依旧是**只增不改**。
-    assert len(paths) == 47, f"路径总数应为 47（P0-P6 的 40 + 自由学习 6 + 保存知识 1），实际 {len(paths)}"
+    # Phase 5C-2 新增 1 个路径（/api/study/learn-target）。依旧是**只增不改**。
+    assert len(paths) == 48, (
+        f"路径总数应为 48（P0-P6 的 40 + 自由学习 6 + 保存知识 1 + 学习主题 1），实际 {len(paths)}"
+    )
