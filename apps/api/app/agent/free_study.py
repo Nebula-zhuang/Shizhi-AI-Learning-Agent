@@ -70,6 +70,22 @@ _SEARCH_INTENT = re.compile(
 #: 单独一个版本号不构成时效问题，但**在"问一个具体版本的情况"这个语境下它几乎总是**。
 _VERSION_REF = re.compile(r"[A-Za-z][A-Za-z0-9.+#-]*\s+\d{1,3}(?:\.\d+)*\b")
 
+#: **学习意图信号**（5B）。命中就进 Loop，让决策模型去判断"这是想问一个概念，
+#: 还是想学一个主题"。
+#:
+#: ⚠️ 为什么必须有这条：`quick_route` 的兜底是"通用问题直接回答、不进 Loop" ——
+#: 于是"我想学 Java 线程"会被**快通道直接答掉，决策模型根本没机会看到它**，
+#: 5B 的学习意图永远产不出来。这条规则是把这类问题**送进 Loop** 的唯一入口。
+#:
+#: ⚠️ 命中**只表示"值得让模型看一眼"**，不代表真的会给提议：
+#: 是否成意图由决策模型判断（见 `loop_decide.md`）。所以这里宁可宽一点 ——
+#: 误命中只是多花一次决策调用，漏命中则功能完全失效。
+_LEARN_INTENT_HINTS = re.compile(
+    r"(想学|要学|学一下|学着|教我|带我学|帮我学|系统学|系统性地学|从头学|"
+    r"入门|怎么学|如何学|从哪.*开始学|从什么.*开始学|学习路线|学习路径|"
+    r"讲一遍|过一遍|帮我梳理|带我过)"
+)
+
 #: **时钟类信号**。命中就必须拿到真实时间，**不能靠模型的记忆**。
 #:
 #: 实测踩过的确定性错误：
@@ -192,6 +208,12 @@ def quick_route(
     if _TIME_HINTS.search(text):
         return None
 
+    # **像"想学某个主题"的说法 → 进 Loop**。
+    # 快通道是一句规则，判断不了"问概念"和"想开一门课"的区别；
+    # 把这一步交给决策模型（见 `_LEARN_INTENT_HINTS` 的说明）。
+    if _LEARN_INTENT_HINTS.search(text):
+        return None
+
     # 既没提资料、也没时效信号 → **直接回答，不进 Loop**
     return StudyPlan(["general"], "通用问题，无需检索", "concept")
 
@@ -234,11 +256,20 @@ def _render_material(observation: LoopObservation) -> str:
 # --------------------------------------------------------------------------- #
 # Loop 的两个注入点
 # --------------------------------------------------------------------------- #
-def _make_decider(*, images: Sequence[str], document_ids: Sequence[int]):
+def _make_decider(
+    *,
+    images: Sequence[str],
+    document_ids: Sequence[int],
+    learn_sink: list[dict[str, str]] | None = None,
+):
     """生产环境的决策函数：一次 `chat_json`，走项目的既有 JSON 通道。
 
     刻意**不用原生 function calling** —— 与 P1/P2/P4 同一套通道，
     改动面为零。这一点在 `registry.py` 里已有论证。
+
+    `learn_sink` 是**可选的收集箱**：决策模型若判断出"这轮其实是想学某个主题"，
+    会把结构化意图放进这里，由 `stream_turn` 挂到 `done` 事件上。
+    传 None 表示不关心（测试里常用）。
     """
     system, template = _load_prompt("loop_decide.md")
 
@@ -358,9 +389,67 @@ def _make_decider(*, images: Sequence[str], document_ids: Sequence[int]):
             logger.warning("Agent 决策调用失败：%s", exc)
             raise
 
+        # 学习意图（5B）：决策 JSON 里**可选**的一个字段。
+        #
+        # 为什么在这里取而不是让 LoopDecision 带上：
+        # `LoopDecision` 是循环的通用结构，为了一个只属于自由学习的字段去改它，
+        # 会把"提议学什么"这个产品概念渗进 runtime loop。
+        # 而 `raw` 就在手边，取完就丢 —— 循环那边零改动。
+        #
+        # **只认第一个**：意图是从问题本身读出来的，第一步决策看到的是最原始的问题；
+        # 后面几步看到的是工具结果，容易被"资料里提到了 X"带偏。
+        suggestion = _parse_learn_suggestion(raw)
+        if suggestion is not None and learn_sink is not None and not learn_sink:
+            learn_sink.append(suggestion)
+
         return _parse_decision(raw)
 
     return decider
+
+
+#: 允许的学习意图种类。
+#: `topic` —— 想从零学一个主题（"我想学 Java 线程"）
+#: `material` —— 想借自己的材料学（"帮我照资料把第三章讲一遍"）
+LEARN_SUGGESTION_KINDS = frozenset({"topic", "material"})
+
+#: 主题名的长度上限。与知识点标题同一口径（`KnowledgePoint.title` 是 255，
+#: 但那是存库的宽限；**给用户看的主题名**应当短 —— 长了说明模型把一整句话
+#: 当成了主题，那不是一个可以"去学"的东西）。
+LEARN_TOPIC_MAX_CHARS = 30
+
+
+def _parse_learn_suggestion(raw: Any) -> dict[str, str] | None:
+    """从决策 JSON 里取**可选**的学习意图。**取不到就返回 None，绝不猜。**
+
+    形状：
+
+        {"learn_suggestion": {"topic": "Java 线程", "kind": "topic"}}
+
+    ⚠️ 这里的默认是**"没有意图"**：字段缺失、类型不对、topic 为空，
+    一律 None。**不能因为"看起来像是在问东西"就凑一个提议出来** ——
+    凭空冒出的"要开始练习吗？"比不提议更烦人。
+
+    `kind` 缺失或不在白名单里时归一成 `topic`：模型偶尔漏字段，
+    而"漏了 kind"比"整条提议作废"更常见，也更无害。
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    block = raw.get("learn_suggestion")
+    if not isinstance(block, dict):
+        return None
+
+    topic = str(block.get("topic") or "").strip()
+    if not topic:
+        return None
+    if len(topic) > LEARN_TOPIC_MAX_CHARS:
+        topic = topic[:LEARN_TOPIC_MAX_CHARS]
+
+    kind = str(block.get("kind") or "").strip()
+    if kind not in LEARN_SUGGESTION_KINDS:
+        kind = "topic"
+
+    return {"topic": topic, "kind": kind}
 
 
 def _parse_decision(raw: Any) -> LoopDecision:
@@ -549,6 +638,13 @@ async def stream_turn(
         return
 
     # ── 进 Loop
+    #
+    # 学习意图的收集箱（5B）。决策模型若判断出"这轮是想学某个主题"，
+    # 会把它放进来；收尾时**有才挂到 done 上**。
+    #
+    # ⚠️ 快通道（上面的 `if quick is not None`）**不参与** ——
+    # 它只处理"一眼能答"的通用问题，那种问题本来就不该冒出"要开始练习吗"。
+    learn_sink: list[dict[str, str]] = []
     runner = ToolRunner(
         max_calls=(limits or _limits_from_settings()).max_tool_calls,
         max_seconds=(limits or _limits_from_settings()).total_seconds,
@@ -556,7 +652,9 @@ async def stream_turn(
     loop = AgentLoop(
         registry=tool_registry,
         runner=runner,
-        decider=_make_decider(images=images, document_ids=document_ids or ()),
+        decider=_make_decider(
+            images=images, document_ids=document_ids or (), learn_sink=learn_sink
+        ),
         generate=_make_generator(history=history, learner_memory=learner_memory),
         limits=limits or _limits_from_settings(),
     )
@@ -595,23 +693,29 @@ async def stream_turn(
                 if result.ok and result.display:
                     outcome.sources.append(result.display)
                 outcome.citations.extend(result.citations)
-            yield TurnEvent(
-                "done",
-                {
-                    "capabilities": sorted(
-                        {str(r.display.get("kind", "")) for r in observation.results if r.ok}
-                    )
-                    or ["general"],
-                    "sources": outcome.sources,
-                    "citations": outcome.citations,
-                    "status_trace": outcome.status_trace,
-                    "degraded_reason": outcome.degraded_reason,
-                    "steps": outcome.steps,
-                    "provider": outcome.provider,
-                    "fell_back": outcome.fell_back,
-                    "fallback_reason": outcome.fallback_reason,
-                },
-            )
+            payload: dict[str, Any] = {
+                "capabilities": sorted(
+                    {str(r.display.get("kind", "")) for r in observation.results if r.ok}
+                )
+                or ["general"],
+                "sources": outcome.sources,
+                "citations": outcome.citations,
+                "status_trace": outcome.status_trace,
+                "degraded_reason": outcome.degraded_reason,
+                "steps": outcome.steps,
+                "provider": outcome.provider,
+                "fell_back": outcome.fell_back,
+                "fallback_reason": outcome.fallback_reason,
+            }
+            # 学习意图：**有才加这个键**。
+            #
+            # 刻意不做成 `"learn_suggestion": None` 常驻 —— 那样前端拿到的
+            # 每一条消息都带一个恒为 null 的字段，判断"要不要弹提议"就得
+            # 靠 `!= null`，而"字段在不在"这个更强的信号反而丢了。
+            # 普通提问的 payload 与 5B 之前**逐字节一致**。
+            if learn_sink:
+                payload["learn_suggestion"] = learn_sink[0]
+            yield TurnEvent("done", payload)
             continue
 
         yield TurnEvent(event.event, event.data)
