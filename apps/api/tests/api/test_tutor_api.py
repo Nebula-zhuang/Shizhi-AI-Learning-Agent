@@ -334,6 +334,8 @@ def test_existing_routes_still_registered() -> None:
         # Phase 5D 待办清单。同上，加进守护列表。
         "/api/todos",
         "/api/todos/{todo_id}",
+        # Phase 5E 学习报告。同上，加进守护列表。
+        "/api/reports/learning",
     ):
         assert required in paths, f"既有接口缺失：{required}"
     # P6 新增 2 个流式入口（/api/tutor/start/stream、/api/tutor/answer/stream）——
@@ -347,7 +349,7 @@ def test_existing_routes_still_registered() -> None:
     # 依旧是**只增不改**。
     # Phase 5C-2 新增 1 个路径（/api/study/learn-target）。依旧是**只增不改**。
     # Phase 5D 新增 2 个路径（/api/todos、/api/todos/{todo_id}）。同上。
-    assert len(paths) == 50, (
-        f"路径总数应为 50（P0-P6 的 40 + 自由学习 6 + 保存知识 1 + 学习主题 1 + 待办 2），"
+    assert len(paths) == 51, (
+        f"路径总数应为 51（P0-P6 的 40 + 自由学习 6 + 保存知识 1 + 学习主题 1 + 待办 2 + 学习报告 1），"
         f"实际 {len(paths)}"
     )

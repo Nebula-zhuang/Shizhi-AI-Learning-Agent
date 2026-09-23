@@ -29,6 +29,7 @@ import { LearnView } from './features/learn/LearnView'
 import { LibraryView } from './features/library/LibraryView'
 import { ProfileView } from './features/profile/ProfileView'
 import { FreeStudyView } from './features/study/FreeStudyView'
+import { ReportView } from './features/report/ReportView'
 import { TodayView } from './features/today/TodayView'
 import { TodoView } from './features/todo/TodoView'
 import { ThemeProvider, ToastProvider } from './ui'
@@ -37,6 +38,7 @@ import { ThemeProvider, ToastProvider } from './ui'
 //: 这里漏了会被 TypeScript 直接拦下，不必等运行时白屏。
 const VIEWS: Record<View, () => JSX.Element> = {
   today: TodayView,
+  report: ReportView,
   learn: LearnView,
   library: LibraryView,
   map: KnowledgeGraphView,

@@ -32,6 +32,7 @@ import { useLearning, type View } from './LearningProvider'
 import { DevPanel } from '../components/DevPanel'
 import {
   IconCheck,
+  IconLayers,
   IconCompass,
   IconHome,
   IconLibrary,
@@ -73,6 +74,7 @@ const LIBRARY_NAV: NavItem[] = [
 
 const PERSONAL_NAV: NavItem[] = [
   // 待办放在个人区：它是"我自己的事"，与学习状态无关，也不接 AI
+  { key: 'report', label: '学习报告', hint: '我学得怎么样', icon: IconLayers },
   { key: 'todo', label: '待办', hint: '我要做什么', icon: IconCheck },
   { key: 'profile', label: '我的', hint: '学习记录与偏好', icon: IconUser },
 ]

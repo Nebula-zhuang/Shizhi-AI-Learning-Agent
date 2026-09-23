@@ -390,6 +390,8 @@ def test_existing_routes_untouched() -> None:
         # Phase 5D 待办清单。同上。
         "/api/todos",
         "/api/todos/{todo_id}",
+        # Phase 5E 学习报告。同上。
+        "/api/reports/learning",
     ):
         assert required in paths, f"既有接口缺失：{required}"
     # P6 新增 2 个流式入口（见 test_tutor_api.py 的同类断言说明）
@@ -399,4 +401,4 @@ def test_existing_routes_untouched() -> None:
     # Phase 3A 新增 1 个路径（/api/study/knowledge，POST + GET 共用）。
     # Phase 5C-2 新增 1 个路径（/api/study/learn-target）。同样是**只增不改**。
     # Phase 5D 新增 2 个路径（/api/todos、/api/todos/{todo_id}）。同上。
-    assert len(paths) == 50, f"路径总数应为 50，实际 {len(paths)}"
+    assert len(paths) == 51, f"路径总数应为 51，实际 {len(paths)}"
