@@ -385,8 +385,13 @@ def _parse_decision(raw: Any) -> LoopDecision:
     return LoopDecision(thought=thought, tool=tool.strip(), arguments=arguments)
 
 
-def _make_generator(*, history: Sequence[dict[str, str]]):
-    """生产环境的最终生成：流式，且带上素材与禁令。"""
+def _make_generator(*, history: Sequence[dict[str, str]], learner_memory: str = ""):
+    """生产环境的最终生成：流式，且带上素材与禁令。
+
+    `learner_memory`（P5）是这位学习者的**长期讲法偏好**，由**路由层**从
+    `memory_service.load_memory` 读好、渲染成一句话传进来。
+    本模块只负责把它填进提示词 —— **不碰记忆库，也不持有 DB session**。
+    """
     system, template = _load_prompt("free_study_answer.md")
 
     async def generate(observation: LoopObservation) -> AsyncIterator[str]:
@@ -399,7 +404,17 @@ def _make_generator(*, history: Sequence[dict[str, str]]):
             if role in {"user", "assistant"} and content:
                 messages.append({"role": role, "content": content})
 
-        tail = _fill(template, {"material": material, "question": observation.question})
+        tail = _fill(
+            template,
+            {
+                "material": material,
+                "question": observation.question,
+                # 读不到记忆时给一句中性说明 —— **绝不能留空**：
+                # 留空会让「## 这位学习者的讲法偏好」变成一个空标题，
+                # 模型可能把它当成别的东西（比如以为要求它自己猜）。
+                "learner_memory": learner_memory or "（暂无特别偏好，用常规讲法。）",
+            },
+        )
         if observation.stop_note:
             tail += f"\n\n（补充说明：{observation.stop_note}）"
         messages.append({"role": "user", "content": tail})
@@ -452,6 +467,7 @@ async def stream_turn(
     kb_size: int = 0,
     has_attachments: bool = False,
     learner_id: str = DEFAULT_LEARNER_ID,
+    learner_memory: str = "",
     provider: Any = None,
     allow_web: bool = True,
     registry: ToolRegistry | None = None,
@@ -514,7 +530,9 @@ async def stream_turn(
     if quick is not None:
         logger.info("自由学习快通道：%s（%s）", quick.capabilities, quick.reason)
         yield status("正在整理答案…")
-        async for piece in _make_generator(history=history)(observation):
+        async for piece in _make_generator(
+            history=history, learner_memory=learner_memory
+        )(observation):
             yield TurnEvent("delta", {"text": piece})
         outcome.content = ""
         yield TurnEvent(
@@ -539,7 +557,7 @@ async def stream_turn(
         registry=tool_registry,
         runner=runner,
         decider=_make_decider(images=images, document_ids=document_ids or ()),
-        generate=_make_generator(history=history),
+        generate=_make_generator(history=history, learner_memory=learner_memory),
         limits=limits or _limits_from_settings(),
     )
 

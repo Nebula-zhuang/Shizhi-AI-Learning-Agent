@@ -52,6 +52,7 @@ from app.ingestion.router import validate_upload
 from app.services import (
     document_service,
     ingest_runner,
+    memory_service,
     saved_knowledge_service,
     study_service,
 )
@@ -356,6 +357,27 @@ async def ask(
         touch=False,
     )
 
+    # 长期记忆（P5）：**沿用 Tutor 那一套**，这里只是读出来注入提示词。
+    #
+    # 为什么在**路由层**读、而不是让 Agent 自己去读：
+    #   · `stream_turn` 里没有 db，把 session 穿进 runtime loop 会让一次多步编排
+    #     始终占着一个连接（3B 给 `search_saved_knowledge` 定下的同一取舍）。
+    #   · 记忆是**每轮一次**的东西，读一次传下去最省。
+    #
+    # ⚠️ `knowledge_point_id=None` —— 自由学习讨论的话题**不一定对应知识点**，
+    # 所以走的是 `load_memory` 的"无 KP"路径：只拿到讲法偏好。
+    # 这恰好是"共享学习状态"里**只读**的那一半；写回掌握度需要话题→知识点映射，
+    # 不在本轮范围内。
+    #
+    # `load_memory` 内部**已保证不抛**（读不到就退化成默认值），这里再兜一层：
+    # 注入长期记忆**绝不能**变成"这轮回答不出来"的理由。
+    learner_memory = ""
+    try:
+        memory = memory_service.load_memory(db, learner_id=learner_id)
+        learner_memory = memory_service.style_instruction(memory.preferred_style)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("自由学习读取长期记忆失败，按无偏好继续：%s", exc)
+
     async def event_source() -> AsyncIterator[str]:
         """跑完一轮并落库。
 
@@ -382,6 +404,8 @@ async def ask(
                 # 跨对话检索要按人隔离 —— 绑定进 `search_saved_knowledge`，
                 # 模型给不出、也不该给这个值。
                 learner_id=learner_id,
+                # 长期讲法偏好（P5）：与「辅导」页共用同一份，路由层读好传进来。
+                learner_memory=learner_memory,
                 allow_web=True,
             ):
                 if event.event == "delta":
