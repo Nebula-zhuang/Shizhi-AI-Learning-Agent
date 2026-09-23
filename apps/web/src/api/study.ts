@@ -287,6 +287,22 @@ export interface LoopStep {
   elapsed_ms: number
 }
 
+/**
+ * 学习意图的类型与解析。
+ *
+ * ⚠️ 定义在 `./learnSuggestion` 而不是这里 —— `api/study.ts` 有运行时依赖
+ * （`./http`），而前端单测用 `--experimental-strip-types` 会真的去解析模块路径，
+ * 于是"从 api/study 导入一个值"的测试必然 `ERR_MODULE_NOT_FOUND`。
+ * 那个文件零依赖、可以放心被 `.ts` 测试引用。
+ *
+ * ⚠️ 这里要**既 import 又 re-export**：`export … from` 只是转发，
+ * 不会在本文件里引入名字，而下面的 `onDone` 签名要用到 `LearnSuggestion`。
+ */
+import { parseLearnSuggestion, type LearnSuggestion } from './learnSuggestion'
+
+export { parseLearnSuggestion }
+export type { LearnSuggestion }
+
 export interface AskHandlers {
   /** 自然语言状态。**直接用后端给的原话** —— 前端不自己编措辞。 */
   onStatus?: (text: string) => void
@@ -311,6 +327,11 @@ export interface AskHandlers {
     provider: string
     fell_back: boolean
     fallback_reason: string
+    /**
+     * 学习意图。**只有后端判断出"他想学一个主题"时才有这个键** ——
+     * 普通提问这里是 `undefined`（不是 null），据此决定要不要显示提议卡。
+     */
+    learn_suggestion?: LearnSuggestion
   }) => void
   onError?: (message: string) => void
   /**
@@ -394,7 +415,8 @@ export async function askQuestion(
           fallbackReason: (payload.fallback_reason as string) ?? undefined,
         })
         break
-      case 'done':
+      case 'done': {
+        const suggestion = parseLearnSuggestion(payload.learn_suggestion)
         handlers.onDone?.({
           capabilities: (payload.capabilities as string[]) ?? [],
           sources: (payload.sources as TurnSource[]) ?? [],
@@ -405,8 +427,12 @@ export async function askQuestion(
           provider: (payload.provider as string) ?? '',
           fell_back: Boolean(payload.fell_back),
           fallback_reason: (payload.fallback_reason as string) ?? '',
+          // 有才带上这个键（不是 `undefined` 占位）——
+          // 下游靠"键在不在"判断要不要显示提议卡。
+          ...(suggestion ? { learn_suggestion: suggestion } : {}),
         })
         break
+      }
       case 'error':
         handlers.onError?.(String(payload.text ?? '这轮回答没能完成。'))
         break

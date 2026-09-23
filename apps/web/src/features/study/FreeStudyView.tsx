@@ -41,6 +41,7 @@ import {
   uploadAttachment,
   type AttachmentUpload,
   type ConversationSummary,
+  type LearnSuggestion,
   type SavedKnowledgeItem,
   type StudyCapabilities,
   type StudyMessage,
@@ -51,6 +52,8 @@ import {
 import { stripBlockMarkup, stripInlineMarkup } from '../../lib/plainText'
 import { ProgressiveText, Reveal } from '../../motion/primitives'
 import { useDevMode } from '../../app/DevModeProvider'
+import { useLearning } from '../../app/LearningProvider'
+import { continuePrompt, learnProposalCard } from './learnProposal'
 import {
   emptyListHint,
   filterConversations,
@@ -106,6 +109,12 @@ interface Turn {
    * 用户看到的是"整段文字闪了一下"。历史消息不存在这个问题（本来就是新出现）。
    */
   fromHistory?: boolean
+  /**
+   * 学习意图（5C）。**只在后端判断出"他想学一个主题"时才有** ——
+   * 由 `done` 事件带过来，历史消息里**永远没有**（它不落库），
+   * 所以打开旧对话不会冒出提议卡。
+   */
+  learnSuggestion?: LearnSuggestion
   role: 'user' | 'assistant'
   content: string
   sources: TurnSource[]
@@ -132,6 +141,15 @@ export function FreeStudyView() {
    * 普通用户不该看到这些；开发者模式下才展开。
    */
   const { devMode } = useDevMode()
+  /**
+   * 「开始学习」要跳到「辅导」页。
+   *
+   * ⚠️ 这里只切视图、**不调 `startLearning(focus)`** —— 那个 API 需要一个
+   * 已有的知识点 id，而"想学 Java 线程"里的主题**还没被解析成知识点**
+   * （topic→知识点 的匹配不在 5C-1 范围内）。切过去之后，
+   * 辅导页自己的选点器会让用户挑一个具体的点开始 —— 这条路不需要 kpId。
+   */
+  const { setView } = useLearning()
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
@@ -257,6 +275,21 @@ export function FreeStudyView() {
     },
     [toast],
   )
+
+  // ── 学习提议卡的两个动作（5C-1）
+  //
+  // 「继续自由学习」**只填不发** —— 替用户把消息发出去等于替他做了决定，
+  // 他可能只是想先看看，或者想换个说法问。填好、聚焦，按不按回车是他的事。
+  const handleKeepLearning = useCallback((suggestion: LearnSuggestion) => {
+    setDraft(continuePrompt(suggestion))
+    inputRef.current?.focus()
+  }, [])
+
+  // 「开始学习」跳到「辅导」：只切视图，由辅导页的选点器决定从哪个知识点开始
+  // （见 `useLearning` 那段的说明 —— 主题还没被解析成知识点）。
+  const handleStartLearning = useCallback(() => {
+    setView('learn')
+  }, [setView])
 
   // ── 新消息进来后滚到底部
   useEffect(() => {
@@ -474,8 +507,14 @@ export function FreeStudyView() {
           if (citation.url && t.citations.some((c) => c.url === citation.url)) return t
           return { ...t, citations: [...t.citations, citation] }
         }),
-      onDone: () => {
-        patch((t) => ({ ...t, streaming: false }))
+      onDone: (result) => {
+        patch((t) => ({
+          ...t,
+          streaming: false,
+          // 有才带上 —— 后端不加这个键时 `learnSuggestion` 保持 undefined，
+          // 提议卡就整块不渲染（见 `learnProposal.ts` 的理由）。
+          ...(result.learn_suggestion ? { learnSuggestion: result.learn_suggestion } : {}),
+        }))
         setStatus('')
         // 消息条数变了，列表要跟着更新（标题也可能被后端自动生成）
         void listConversations().then((data) => setConversations(data.items))
@@ -590,6 +629,8 @@ export function FreeStudyView() {
                     savedMessageIds={savedMessageIds}
                     savingMessageId={savingMessageId}
                     onSave={(messageId) => void handleSave(messageId)}
+                    onKeepLearning={handleKeepLearning}
+                    onStartLearning={handleStartLearning}
                   />
                 </Reveal>
               ))}
@@ -755,11 +796,15 @@ function TurnBlock({
   savedMessageIds,
   savingMessageId,
   onSave,
+  onKeepLearning,
+  onStartLearning,
 }: {
   turn: Turn
   savedMessageIds: ReadonlySet<number>
   savingMessageId: number | null
   onSave: (messageId: number) => void
+  onKeepLearning: (suggestion: LearnSuggestion) => void
+  onStartLearning: () => void
 }) {
   if (turn.role === 'user') {
     return (
@@ -806,6 +851,12 @@ function TurnBlock({
           ))}
         </ul>
       )}
+
+      <LearnProposal
+        suggestion={turn.learnSuggestion}
+        onKeep={onKeepLearning}
+        onStart={onStartLearning}
+      />
 
       <SaveAction
         turn={turn}
@@ -861,6 +912,47 @@ function AssistantText({ turn }: { turn: Turn }) {
       {turn.streaming && (
         <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-moss align-text-bottom" />
       )}
+    </div>
+  )
+}
+
+/**
+ * 学习提议卡（5C-1）。
+ *
+ * 后端只在判断出"他想学一个主题"时才带 `learnSuggestion`；
+ * **没有就整块不渲染**（`learnProposalCard` 返回 null）——
+ * 一个只在少数情况下出现的提议，比每次都问"要不要开始学习"克制得多。
+ *
+ * 两个按钮是**并列选项**，不是"主流程 + 跳过"：文案里明确说了
+ * "也可以留在这儿接着问"，免得用户以为非走不可。
+ */
+function LearnProposal({
+  suggestion,
+  onKeep,
+  onStart,
+}: {
+  suggestion: LearnSuggestion | undefined
+  onKeep: (suggestion: LearnSuggestion) => void
+  onStart: () => void
+}) {
+  const card = learnProposalCard(suggestion)
+  if (!card || !suggestion) return null
+
+  return (
+    <div className="rounded-xl border border-moss-line bg-moss-soft/40 px-3.5 py-3">
+      <p className="flex items-center gap-1.5 text-xs font-medium text-moss-ink">
+        <IconSpark size={13} />
+        {card.title}
+      </p>
+      <p className="mt-1 text-2xs leading-relaxed text-ink-3">{card.description}</p>
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        <Button variant="primary" size="sm" onClick={onStart}>
+          {card.startLabel}
+        </Button>
+        <Button variant="quiet" size="sm" onClick={() => onKeep(suggestion)}>
+          {card.keepLabel}
+        </Button>
+      </div>
     </div>
   )
 }
