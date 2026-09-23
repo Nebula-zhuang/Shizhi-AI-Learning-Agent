@@ -22,6 +22,7 @@ from app.api.routes import knowledge as knowledge_routes
 from app.api.routes import rag as rag_routes
 from app.api.routes import tutor as tutor_routes
 from app.api.routes import study as study_routes
+from app.api.routes import todos as todos_routes
 from app.core.config import settings
 from app.core.llm import llm_gateway
 from app.core.logging import get_logger, setup_logging
@@ -124,6 +125,8 @@ app.include_router(rag_routes.router, prefix=settings.api_prefix)
 # P4：Tutor Agent、教学动作决策与学习状态
 app.include_router(tutor_routes.router, prefix=settings.api_prefix)
 app.include_router(study_routes.router, prefix=settings.api_prefix)
+# 5D：基础待办清单（独立小功能，不接 Agent / RAG / Memory）
+app.include_router(todos_routes.router, prefix=settings.api_prefix)
 
 
 @app.get("/", tags=["system"], summary="服务信息")

@@ -30,14 +30,18 @@ import { LibraryView } from './features/library/LibraryView'
 import { ProfileView } from './features/profile/ProfileView'
 import { FreeStudyView } from './features/study/FreeStudyView'
 import { TodayView } from './features/today/TodayView'
+import { TodoView } from './features/todo/TodoView'
 import { ThemeProvider, ToastProvider } from './ui'
 
+//: 视图注册表。`Record<View, …>` 是有意为之 —— 往 `View` 里加一个成员，
+//: 这里漏了会被 TypeScript 直接拦下，不必等运行时白屏。
 const VIEWS: Record<View, () => JSX.Element> = {
   today: TodayView,
   learn: LearnView,
   library: LibraryView,
   map: KnowledgeGraphView,
   study: FreeStudyView,
+  todo: TodoView,
   profile: ProfileView,
   chat: ChatView,
 }

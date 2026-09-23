@@ -71,6 +71,26 @@ export function putJson<T>(path: string, body?: unknown): Promise<T> {
   })
 }
 
+/**
+ * PATCH —— **部分更新**，只提交请求体里出现过的字段。
+ *
+ * 与 PUT 的区别是语义上的，对后端很重要：待办的 PATCH 里
+ * 「没给 `due_date`」和「给了 `due_date: null`」是两件事
+ * （前者这一项不动，后者清空，见 `apps/api/app/api/routes/todos.py`）。
+ * 用 PUT 表达不了这个区别，所以这个封装是必要的。
+ *
+ * ⚠️ `apps/web/src/api/study.ts` 里另有一份同名私有实现（它写那个封装时
+ * `http.ts` 还没有）。两处行为一致，**该合并成这一份** —— 留作后续清理，
+ * 本轮不动 `study.ts`（那是 Free Study 的地盘）。
+ */
+export function patchJson<T>(path: string, body?: unknown): Promise<T> {
+  return request<T>(path, {
+    method: 'PATCH',
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+}
+
 export function deleteJson<T>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' })
 }

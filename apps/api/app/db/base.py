@@ -36,6 +36,7 @@ from app.models.saved_knowledge import SavedKnowledge  # noqa: E402,F401
 # Session 必须在 Message 之前导入：Message 的关系指向 sessions 表，
 # 虽然 SQLAlchemy 用字符串解析，但先注册 Session 能让外键解析更早完成。
 from app.models.session import Session  # noqa: E402,F401
+from app.models.todo import Todo  # noqa: E402,F401
 from app.models.user import User  # noqa: E402,F401
 
 __all__ = [
@@ -54,4 +55,5 @@ __all__ = [
     "Message",
     "SavedKnowledge",
     "Session",
+    "Todo",
 ]
