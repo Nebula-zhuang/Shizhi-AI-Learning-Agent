@@ -24,9 +24,18 @@ export interface TodoItem {
   completed: boolean
   /** `YYYY-MM-DD`；null = 没有截止日 */
   due_date: string | null
+  /** `none` 不计时 / `countup` 正计时 / `countdown` 倒计时 */
+  timer_mode: TimerMode
+  /** 只有倒计时才有值 */
+  timer_minutes: number | null
+  /** **累计**已计时秒数（不是单次时长） */
+  spent_seconds: number
   created_at: string
   updated_at: string
 }
+
+/** 计时方式。与后端 `app/models/todo.py` 的 `TimerMode` 一一对应。 */
+export type TimerMode = 'none' | 'countup' | 'countdown'
 
 export interface TodoList {
   items: TodoItem[]
@@ -40,11 +49,21 @@ export interface TodoListQuery {
   offset?: number
 }
 
-/** 新建。`due_date` 省略或给 null 都表示"没有截止日"。 */
-export function createTodo(title: string, dueDate?: string | null): Promise<TodoItem> {
+/**
+ * 新建。`due_date` 省略或给 null 都表示"没有截止日"。
+ *
+ * ⚠️ 计时那两个字段是**一对**：给了 `timer_mode` 就要一起给 `timer_minutes`
+ * （倒计时给分钟数，其余给 `null`）。后端会校验自洽性，不自洽 → 422 ✓
+ */
+export function createTodo(
+  title: string,
+  options: { dueDate?: string | null; timerMode?: TimerMode; timerMinutes?: number | null } = {},
+): Promise<TodoItem> {
+  const mode = options.timerMode ?? 'none'
   return postJson<TodoItem>('/api/todos', {
     title,
-    ...(dueDate ? { due_date: dueDate } : {}),
+    ...(options.dueDate ? { due_date: options.dueDate } : {}),
+    ...(mode !== 'none' ? { timer_mode: mode, timer_minutes: options.timerMinutes ?? null } : {}),
   })
 }
 
@@ -59,13 +78,18 @@ export function listTodos(query: TodoListQuery = {}): Promise<TodoList> {
 
 /**
  * 改一条。**只把要改的键放进 `changes`**：
- * 没放进来的键后端不会动（包括 `due_date`）。
+ * 没放进来的键后端不会动（包括 `due_date` 与计时配置）。
  */
 export interface TodoChanges {
   title?: string
   completed?: boolean
   /** 显式传 `null` 才是**清空**；不传这个键 = 不动 */
   due_date?: string | null
+  /** ⚠️ 改计时必须**成对**给：`timer_mode` + `timer_minutes` 一起 */
+  timer_mode?: TimerMode
+  timer_minutes?: number | null
+  /** 计时暂停 / 收尾时回写累计秒数 */
+  spent_seconds?: number
 }
 
 export function updateTodo(id: number, changes: TodoChanges): Promise<TodoItem> {

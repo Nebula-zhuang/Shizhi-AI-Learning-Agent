@@ -31,7 +31,17 @@ import {
   listState,
   remainingLabel,
   sortTodos,
+  TIMER_MINUTES_MAX,
+  TIMER_MINUTES_MIN,
+  canRunTimer,
+  formatClock,
+  isTimerOver,
+  spentLabel,
+  timerLabel,
+  timerPayload,
+  timerSeconds,
   toISODate,
+  validateTimerMinutes,
 } from './todoState.ts'
 import type { TodoItem } from '../../api/todos'
 
@@ -44,6 +54,9 @@ function todo(over: Partial<TodoItem> = {}): TodoItem {
     title: '复习 Java 线程',
     completed: false,
     due_date: null,
+    timer_mode: 'none',
+    timer_minutes: null,
+    spent_seconds: 0,
     created_at: '2026-09-20T10:00:00',
     updated_at: '2026-09-20T10:00:00',
     ...over,
@@ -218,4 +231,104 @@ test('未完成计数：都做完了就不显示', () => {
     remainingLabel([todo({ completed: false }), todo({ completed: true }), todo({ completed: false })]),
     '还有 2 条没做完',
   )
+})
+
+// --------------------------------------------------------------------------- //
+// 六、计时
+//
+// 正计时看"花了多久"，倒计时看"还剩多少"。两者语义不同，
+// 所以 countdown 会封底到 0，而 countup 一直往上走。
+// --------------------------------------------------------------------------- //
+test('不计时的任务不显示计时', () => {
+  const plain = todo({ timer_mode: 'none' })
+  assert.equal(timerLabel(plain), null)
+  assert.equal(canRunTimer(plain), false)
+})
+
+test('已完成的任务不能再计时', () => {
+  assert.equal(canRunTimer(todo({ timer_mode: 'countup', completed: true })), false)
+})
+
+test('正计时：累计 + 本次运行', () => {
+  const item = todo({ timer_mode: 'countup', spent_seconds: 90 })
+  assert.equal(timerSeconds(item), 90, '没在跑时就是累计值')
+  assert.equal(timerSeconds(item, 30), 120, '跑起来要加上本次')
+  assert.equal(timerLabel(item, 30), '02:00')
+})
+
+test('倒计时：从目标往下减', () => {
+  const item = todo({ timer_mode: 'countdown', timer_minutes: 25, spent_seconds: 60 })
+  assert.equal(timerSeconds(item), 25 * 60 - 60)
+  assert.equal(timerLabel(item), '剩 24:00')
+  assert.equal(timerLabel(item, 60), '剩 23:00')
+})
+
+test('⚠️ 倒计时归零就封底，不显示负数', () => {
+  const item = todo({ timer_mode: 'countdown', timer_minutes: 1, spent_seconds: 999 })
+  assert.equal(timerSeconds(item), 0, '不该出现 -939')
+  assert.equal(isTimerOver(item), true)
+  assert.equal(timerLabel(item), '时间到了')
+})
+
+test('倒计时到点判定', () => {
+  const item = todo({ timer_mode: 'countdown', timer_minutes: 1, spent_seconds: 30 })
+  assert.equal(isTimerOver(item), false)
+  assert.equal(isTimerOver(item, 30), true, '跑满 60 秒即到点')
+})
+
+test('正计时永远不会"到点"', () => {
+  const item = todo({ timer_mode: 'countup', spent_seconds: 99999 })
+  assert.equal(isTimerOver(item), false)
+})
+
+test('没给分钟数的倒计时不算到点（防御坏数据）', () => {
+  const broken = todo({ timer_mode: 'countdown', timer_minutes: null, spent_seconds: 9999 })
+  assert.equal(isTimerOver(broken), false)
+  assert.equal(timerSeconds(broken), 0)
+})
+
+test('formatClock：分秒与时分秒', () => {
+  assert.equal(formatClock(0), '00:00')
+  assert.equal(formatClock(59), '00:59')
+  assert.equal(formatClock(60), '01:00')
+  assert.equal(formatClock(1500), '25:00')
+  assert.equal(formatClock(3599), '59:59')
+  assert.equal(formatClock(3600), '1:00:00')
+  assert.equal(formatClock(3661), '1:01:01')
+})
+
+test('formatClock 对负数与小数都不崩', () => {
+  assert.equal(formatClock(-5), '00:00')
+  assert.equal(formatClock(59.9), '00:59')
+})
+
+test('累计时长的人话（不足一分钟不显示）', () => {
+  assert.equal(spentLabel(30), null)
+  assert.equal(spentLabel(60), '累计 1 分钟')
+  assert.equal(spentLabel(59 * 60), '累计 59 分钟')
+  assert.equal(spentLabel(60 * 60), '累计 1 小时')
+  assert.equal(spentLabel(90 * 60), '累计 1 小时 30 分')
+})
+
+test('提交给后端的计时字段必须成对且自洽', () => {
+  // 后端规则：countdown 必须给分钟数；其余必须不给 ✓
+  assert.deepEqual(timerPayload('none', null), { timer_mode: 'none', timer_minutes: null })
+  assert.deepEqual(timerPayload('countup', null), { timer_mode: 'countup', timer_minutes: null })
+  assert.deepEqual(timerPayload('countdown', 25), {
+    timer_mode: 'countdown',
+    timer_minutes: 25,
+  })
+  // 就算误传了分钟数，非倒计时也要把它抹成 null —— 否则后端 422
+  assert.deepEqual(timerPayload('countup', 25), { timer_mode: 'countup', timer_minutes: null })
+})
+
+test('倒计时分钟数的本地校验（与后端同口径）', () => {
+  assert.equal(validateTimerMinutes(25), null)
+  assert.equal(validateTimerMinutes(TIMER_MINUTES_MIN), null)
+  assert.equal(validateTimerMinutes(TIMER_MINUTES_MAX), null)
+  assert.ok(validateTimerMinutes(null), '没填要提示')
+  assert.ok(validateTimerMinutes(0))
+  assert.ok(validateTimerMinutes(-1))
+  assert.ok(validateTimerMinutes(TIMER_MINUTES_MAX + 1))
+  assert.ok(validateTimerMinutes(1.5), '小数分钟要提示')
 })

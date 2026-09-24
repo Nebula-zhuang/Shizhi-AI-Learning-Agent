@@ -142,3 +142,123 @@ export function remainingLabel(items: readonly TodoItem[]): string | null {
   if (left === 0) return null
   return `还有 ${left} 条没做完`
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   计时（Phase 5D+）
+
+   两种模式，语义完全不同：
+
+   | 模式 | 看的是 | 归零时 |
+   |---|---|---|
+   | `countup` | 「**已经花了多久**」 | 不会归零，一直往上走 |
+   | `countdown` | 「**还剩多少**」 | 到 0 就停，提示一句 |
+
+   ⚠️ `spent_seconds` 是**累计**值，不是某一次的时长 ——
+   暂停、继续、刷新页面，它都接着累加（前端运行中的秒数另算，见下）。
+
+   ⚠️ **计时跑起来的秒数不进这里**：那是前端内存里的 `runningSeconds`，
+   定期回写成 `spent_seconds`。纯函数只负责把两者加起来算显示值，
+   不持有任何"现在几点"的状态 —— 否则就没法测了 ✗
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** 这条待办能不能计时（不计时的、已完成的，都不能）。 */
+export function canRunTimer(todo: Pick<TodoItem, 'timer_mode' | 'completed'>): boolean {
+  return todo.timer_mode !== 'none' && !todo.completed
+}
+
+/**
+ * 当前该显示的总秒数。
+ *
+ * `runningSeconds` 是**这次运行**已经跑过的秒数（未落库的那部分）。
+ * 倒计时会**封底到 0**，不会显示负数 —— 归零后停在那儿 ✓
+ */
+export function timerSeconds(
+  todo: Pick<TodoItem, 'timer_mode' | 'timer_minutes' | 'spent_seconds'>,
+  runningSeconds = 0,
+): number {
+  const total = Math.max(0, todo.spent_seconds + Math.max(0, runningSeconds))
+  if (todo.timer_mode === 'countdown') {
+    const target = (todo.timer_minutes ?? 0) * 60
+    return Math.max(0, target - total)
+  }
+  return total
+}
+
+/** 倒计时是不是已经走完了。 */
+export function isTimerOver(
+  todo: Pick<TodoItem, 'timer_mode' | 'timer_minutes' | 'spent_seconds'>,
+  runningSeconds = 0,
+): boolean {
+  if (todo.timer_mode !== 'countdown') return false
+  const target = (todo.timer_minutes ?? 0) * 60
+  return target > 0 && todo.spent_seconds + Math.max(0, runningSeconds) >= target
+}
+
+/**
+ * 秒数 → `mm:ss`（超过一小时变 `h:mm:ss`）。
+ *
+ * 不做"约等于几分钟"这种模糊化 —— 计时器显示的就是精确到秒的时间，
+ * 这是它唯一的作用 ✓
+ */
+export function formatClock(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(safe / 3600)
+  const minutes = Math.floor((safe % 3600) / 60)
+  const secs = safe % 60
+  const mm = String(minutes).padStart(2, '0')
+  const ss = String(secs).padStart(2, '0')
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`
+}
+
+/** 计时条上显示的文字。不计时的返回 `null`。 */
+export function timerLabel(
+  todo: Pick<TodoItem, 'timer_mode' | 'timer_minutes' | 'spent_seconds'>,
+  runningSeconds = 0,
+): string | null {
+  if (todo.timer_mode === 'none') return null
+  const shown = timerSeconds(todo, runningSeconds)
+  if (todo.timer_mode === 'countdown') {
+    return isTimerOver(todo, runningSeconds) ? '时间到了' : `剩 ${formatClock(shown)}`
+  }
+  return formatClock(shown)
+}
+
+/** 累计时长给一句人话（列表里不显示，报告/详情里用）。 */
+export function spentLabel(seconds: number): string | null {
+  if (seconds < 60) return null
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `累计 ${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest ? `累计 ${hours} 小时 ${rest} 分` : `累计 ${hours} 小时`
+}
+
+/**
+ * 添加框里的计时选项 → **提交给后端的两个字段**（snake_case）。
+ *
+ * 后端要求这两个字段**成对且自洽**（`countdown` 必须给分钟数，
+ * 其余必须不给）✓ 这个小函数是那层转换的唯一样本，
+ * 免得每处调用各写一遍、各错一次 ✗
+ *
+ * ⚠️ 返回的是后端字段名。`createTodo` 接收的是 camelCase 选项，
+ * 两边由各自负责映射 —— 想直接对后端的调用方（比如 PATCH）用这个 ✓
+ */
+export function timerPayload(
+  mode: 'none' | 'countup' | 'countdown',
+  minutes: number | null,
+): { timer_mode: 'none' | 'countup' | 'countdown'; timer_minutes: number | null } {
+  if (mode !== 'countdown') return { timer_mode: mode, timer_minutes: null }
+  return { timer_mode: mode, timer_minutes: minutes }
+}
+
+/** 倒计时分钟数是否合法（与后端 `TIMER_MINUTES_MIN/MAX` 同一口径）。 */
+export const TIMER_MINUTES_MIN = 1
+export const TIMER_MINUTES_MAX = 600
+
+export function validateTimerMinutes(value: number | null): string | null {
+  if (value === null || value === undefined || Number.isNaN(value)) return '填个分钟数'
+  if (!Number.isInteger(value)) return '要整数分钟'
+  if (value < TIMER_MINUTES_MIN) return `至少 ${TIMER_MINUTES_MIN} 分钟`
+  if (value > TIMER_MINUTES_MAX) return `不超过 ${TIMER_MINUTES_MAX} 分钟`
+  return null
+}

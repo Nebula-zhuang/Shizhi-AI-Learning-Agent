@@ -385,3 +385,139 @@ def test_anonymous_cannot_use_todos() -> None:
     client.cookies.clear()
     assert client.get("/api/todos").status_code == 401
     assert client.post("/api/todos", json={"title": "x"}).status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# 计时（Phase 5E+）
+#
+# 计时是一**对**字段（timer_mode + timer_minutes），必须一起给：
+#   countdown 必须给分钟数；countup / none 必须不给。
+# 这一组把"成对"这条规则钉死。
+# --------------------------------------------------------------------------- #
+def _create_with(**body) -> dict:
+    payload = {"title": "计时任务", **body}
+    res = client.post("/api/todos", json=payload)
+    assert res.status_code == 201, res.text
+    return dict(res.json())
+
+
+def test_default_is_no_timer() -> None:
+    _fresh_user()
+    todo = _create_with()
+    assert todo["timer_mode"] == "none"
+    assert todo["timer_minutes"] is None
+    assert todo["spent_seconds"] == 0
+
+
+def test_create_countup_timer() -> None:
+    _fresh_user()
+    todo = _create_with(timer_mode="countup")
+    assert todo["timer_mode"] == "countup"
+    assert todo["timer_minutes"] is None, "正计时不该有目标分钟数"
+
+
+def test_create_countdown_timer() -> None:
+    _fresh_user()
+    todo = _create_with(timer_mode="countdown", timer_minutes=25)
+    assert todo["timer_mode"] == "countdown"
+    assert todo["timer_minutes"] == 25
+
+
+@pytest.mark.parametrize("mode,minutes", [("countup", 25), ("none", 10)])
+def test_countup_and_none_must_not_carry_minutes(mode: str, minutes: int) -> None:
+    """给了分钟数会让人以为它会响 —— 挡掉。"""
+    _fresh_user()
+    res = client.post(
+        "/api/todos", json={"title": "x", "timer_mode": mode, "timer_minutes": minutes}
+    )
+    assert res.status_code == 422
+
+
+def test_countdown_requires_minutes() -> None:
+    _fresh_user()
+    res = client.post("/api/todos", json={"title": "x", "timer_mode": "countdown"})
+    assert res.status_code == 422, "不给分钟数就不知道从哪儿往下数"
+
+
+@pytest.mark.parametrize("bad", [0, -1, 601, 99999])
+def test_countdown_minutes_range(bad: int) -> None:
+    _fresh_user()
+    res = client.post(
+        "/api/todos", json={"title": "x", "timer_mode": "countdown", "timer_minutes": bad}
+    )
+    assert res.status_code == 422
+
+
+def test_unknown_timer_mode_is_rejected() -> None:
+    _fresh_user()
+    res = client.post("/api/todos", json={"title": "x", "timer_mode": "pomodoro"})
+    assert res.status_code == 422
+
+
+def test_patch_switch_countdown_to_countup() -> None:
+    """把倒计时改成正计时 = 显式把分钟数设成 null（与 due_date 的清空同一种语义）。"""
+    _fresh_user()
+    todo_id = _create_with(timer_mode="countdown", timer_minutes=25)["id"]
+
+    res = client.patch(
+        f"/api/todos/{todo_id}", json={"timer_mode": "countup", "timer_minutes": None}
+    )
+
+    assert res.status_code == 200
+    assert res.json()["timer_mode"] == "countup"
+    assert res.json()["timer_minutes"] is None
+
+
+def test_patch_timer_requires_the_mode_to_come_along() -> None:
+    """只给分钟数不给方式 —— 表达不了意图，拒绝。"""
+    _fresh_user()
+    todo_id = _create_with()["id"]
+    res = client.patch(f"/api/todos/{todo_id}", json={"timer_minutes": 30})
+    assert res.status_code == 422
+
+
+def test_patch_spent_seconds() -> None:
+    """计时暂停时前端回写累计秒数。"""
+    _fresh_user()
+    todo_id = _create_with(timer_mode="countup")["id"]
+
+    res = client.patch(f"/api/todos/{todo_id}", json={"spent_seconds": 754})
+
+    assert res.status_code == 200
+    assert res.json()["spent_seconds"] == 754
+    assert res.json()["timer_mode"] == "countup", "回写秒数不该改动计时方式"
+
+
+def test_patch_negative_spent_seconds_is_rejected() -> None:
+    _fresh_user()
+    todo_id = _create_with(timer_mode="countup")["id"]
+    assert client.patch(f"/api/todos/{todo_id}", json={"spent_seconds": -1}).status_code == 422
+
+
+def test_patching_title_does_not_touch_the_timer() -> None:
+    """⚠️ 与 due_date 同一条规矩：改标题不该顺手把计时配置抹掉。"""
+    _fresh_user()
+    todo_id = _create_with(timer_mode="countdown", timer_minutes=25)["id"]
+    client.patch(f"/api/todos/{todo_id}", json={"spent_seconds": 300})
+
+    res = client.patch(f"/api/todos/{todo_id}", json={"title": "改了标题"})
+
+    body = res.json()
+    assert body["title"] == "改了标题"
+    assert body["timer_mode"] == "countdown"
+    assert body["timer_minutes"] == 25
+    assert body["spent_seconds"] == 300, "累计时长被意外清空"
+
+
+def test_timer_does_not_survive_into_other_learners() -> None:
+    """计时配置也受归属隔离 —— 别人改不了我的计时。"""
+    _fresh_user()
+    todo_id = _create_with(timer_mode="countup")["id"]
+
+    client.cookies.clear()
+    _fresh_user()
+    res = client.patch(
+        f"/api/todos/{todo_id}", json={"timer_mode": "countdown", "timer_minutes": 5}
+    )
+
+    assert res.status_code == 404

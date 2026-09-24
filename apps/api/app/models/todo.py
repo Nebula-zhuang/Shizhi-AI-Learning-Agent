@@ -36,11 +36,25 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from enum import StrEnum
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Index, String, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base_class import Base
+
+
+class TimerMode(StrEnum):
+    """一条待办的计时方式。
+
+    定义在模型里而不是别处，是因为它**会被持久化到 `todos.timer_mode`** ——
+    与 `ActionType` 定义在 `models/message.py` 同一个理由：
+    持久化的取值要和读它的地方待在一起，否则改了枚举没人知道库里还有旧值。
+    """
+
+    NONE = "none"  # 不计时（默认，也是加这三列之前的全部历史数据）
+    COUNTUP = "countup"  # 正计时：从 0 往上，看这条花了多久
+    COUNTDOWN = "countdown"  # 倒计时：从 timer_minutes 往下
 
 
 class Todo(Base):
@@ -62,6 +76,21 @@ class Todo(Base):
 
     due_date: Mapped[date | None] = mapped_column(
         Date, nullable=True, comment="哪一天到期；空 = 没有截止日"
+    )
+
+    # ── 计时（见 migrations/0012_todo_timer.py 的取舍说明）
+    timer_mode: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=TimerMode.NONE,
+        server_default=TimerMode.NONE,
+        comment="none / countup / countdown",
+    )
+    timer_minutes: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="倒计时的目标分钟数；正计时与不计时为 NULL"
+    )
+    spent_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0", comment="累计已计时秒数"
     )
 
     created_at: Mapped[datetime] = mapped_column(

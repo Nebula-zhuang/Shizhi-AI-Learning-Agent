@@ -63,7 +63,12 @@ def create_todo(
 ) -> TodoItem:
     """新建一条待办。标题的清洗与"非空"由 schema 层保证（空白标题进不来）。"""
     todo = todo_service.create_todo(
-        db, learner_id=learner_id, title=payload.title, due_date=payload.due_date
+        db,
+        learner_id=learner_id,
+        title=payload.title,
+        due_date=payload.due_date,
+        timer_mode=payload.timer_mode,
+        timer_minutes=payload.timer_minutes,
     )
     return TodoItem.model_validate(todo)
 

@@ -22,13 +22,14 @@
  * 前端判归属只会给人"有防护"的错觉。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   createTodo,
   deleteTodo,
   listTodos,
   updateTodo,
+  type TimerMode,
   type TodoItem,
 } from '../../api/todos'
 import { messageOf } from '../../api/http'
@@ -41,6 +42,7 @@ import {
   ErrorState,
   IconClock,
   IconInbox,
+  IconPause,
   IconPlus,
   IconTrash,
   Modal,
@@ -49,15 +51,29 @@ import {
   useToast,
 } from '../../ui'
 import {
+  TIMER_MINUTES_MAX,
+  TIMER_MINUTES_MIN,
+  canRunTimer,
   canSubmit,
   cleanTitle,
   describe,
   isOverdue,
+  isTimerOver,
   listState,
   remainingLabel,
   sortTodos,
+  timerLabel,
+  timerPayload,
   toISODate,
+  validateTimerMinutes,
 } from './todoState'
+
+/** 新增框里的三个选项。**顺序即推荐顺序**：默认第一个是不计时 ✓ */
+const TIMER_CHOICES: Array<{ key: TimerMode; label: string }> = [
+  { key: 'none', label: '不计时' },
+  { key: 'countup', label: '计时' },
+  { key: 'countdown', label: '倒计时' },
+]
 
 export function TodoView() {
   const toast = useToast()
@@ -73,6 +89,33 @@ export function TodoView() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [pendingDelete, setPendingDelete] = useState<TodoItem | null>(null)
+
+  // ── 新增框里的计时选择
+  const [timerMode, setTimerMode] = useState<TimerMode>('none')
+  const [timerMinutesText, setTimerMinutesText] = useState('25')
+
+  // ── 正在跑的那一条。
+  //
+  // ⚠️ **只记开始时刻，不累加秒数**。原因有两个，都是坑：
+  //   1. 累加就会丢 tick —— 标签页切到后台时 `setInterval` 会被节流，
+  //      一分钟只跑几次，累加出来的时长就是错的 ✗
+  //   2. 每 15 秒落库要靠 `spent_seconds + 本地秒数`，而闭包里的 items 会过期，
+  //      结算时用的是旧值 → **直接把时长算没** ✗✗
+  // 用「现在 - 开始时刻」就没这两个问题：墙钟不会漏 ✓ 也不需要累加状态 ✓
+  const [runningId, setRunningId] = useState<number | null>(null)
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
+  /** 每秒更新一次的"现在"，只为驱动重渲染 —— 不参与任何计算口径 ✓ */
+  const [tickNow, setTickNow] = useState(() => Date.now())
+
+  /** 最近一次渲染的 items，给计时结算用（避开闭包过期）*/
+  const itemsRef = useRef<TodoItem[]>([])
+  itemsRef.current = items
+
+  /** 这次运行已经跑了多少秒（派生值，不落库） */
+  const runningSeconds =
+    runningId !== null && runStartedAt !== null
+      ? Math.max(0, Math.floor((tickNow - runStartedAt) / 1000))
+      : 0
 
   // 「今天」取一次。跨零点不刷新 —— 待办页停留跨天是极小概率，
   // 而为此挂一个定时器属于"为了边界情况付常态成本"。
@@ -98,13 +141,107 @@ export function TodoView() {
     void load()
   }, [load])
 
+  // 只有真的有计时在跑时才挂这个 1 秒的定时器 —— 不在跑的时候一个定时器都不挂 ✓
+  useEffect(() => {
+    if (runningId === null) return
+    const timer = window.setInterval(() => setTickNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [runningId])
+
+  // ── 计时
+  //
+  // `flushRun` 只负责"把一段秒数加进 spent_seconds"，**不动 runningId** ——
+  // 这是刻意的：切换任务时要先把上一个结算掉，如果它顺手把 runningId 置空，
+  // 就会把刚启动的那个也一起清掉（异步先后顺序问题）✗
+  const flushRun = useCallback(
+    async (id: number, seconds: number) => {
+      if (seconds <= 0) return
+      const target = itemsRef.current.find((item) => item.id === id)
+      if (!target) return
+      const total = target.spent_seconds + seconds
+      try {
+        const updated = await updateTodo(id, { spent_seconds: total })
+        setItems((prev) => prev.map((item) => (item.id === id ? updated : item)))
+      } catch (err) {
+        toast.error('计时没能存下来', messageOf(err))
+      }
+    },
+    [toast],
+  )
+
+  /** 暂停：结算这次运行的秒数，然后停下。 */
+  const pauseTimer = useCallback(() => {
+    if (runningId === null) return
+    const seconds = Math.floor((Date.now() - (runStartedAt ?? Date.now())) / 1000)
+    void flushRun(runningId, seconds)
+    setRunningId(null)
+    setRunStartedAt(null)
+  }, [runningId, runStartedAt, flushRun])
+
+  /** 开跑 / 切到这一条。切之前先把上一条结算掉。 */
+  const startTimer = useCallback(
+    (todo: TodoItem) => {
+      if (!canRunTimer(todo)) return
+      if (runningId !== null && runningId !== todo.id && runStartedAt !== null) {
+        const seconds = Math.floor((Date.now() - runStartedAt) / 1000)
+        void flushRun(runningId, seconds)
+      }
+      const now = Date.now()
+      setTickNow(now)
+      setRunStartedAt(now)
+      setRunningId(todo.id)
+    },
+    [runningId, runStartedAt, flushRun],
+  )
+
+  // 每 15 秒把这批秒数落库一次，然后**重置起点** ——
+  // 显示值 = 已落库的 + 这次运行至今的，所以重置起点不会让表盘跳回 0 ✓
+  // 这样一次会话中途关掉标签页，最多只丢 15 秒 ✓
+  useEffect(() => {
+    if (runningId === null || runStartedAt === null) return
+    const flush = window.setInterval(() => {
+      const seconds = Math.floor((Date.now() - runStartedAt) / 1000)
+      if (seconds < 15) return
+      void flushRun(runningId, seconds)
+      setRunStartedAt(Date.now())
+    }, 15000)
+    return () => window.clearInterval(flush)
+  }, [runningId, runStartedAt, flushRun])
+
+  // 倒计时走完：停下 + 说一声。
+  // ⚠️ **不自动打勾** —— 归零只说明"这段时间用完了"，不代表这条做完了
+  // （用户很可能中途去干别的了）✓ 这是产品口径，不是省事。
+  const overNotified = useRef<number | null>(null)
+  useEffect(() => {
+    if (runningId === null) return
+    const target = items.find((item) => item.id === runningId)
+    if (!target || overNotified.current === runningId) return
+    if (!isTimerOver(target, runningSeconds)) return
+    overNotified.current = runningId
+    toast.info('时间到了', `「${target.title}」的倒计时走完了。`)
+    pauseTimer()
+  }, [runningId, items, runningSeconds, toast, pauseTimer])
+
   // ── 新增
   const handleAdd = useCallback(async () => {
     const title = cleanTitle(draft)
     if (!title) return
+    // 倒计时要在前端先校验分钟数 —— 让用户按按钮之前就知道哪里不对 ✓
+    const mode = timerMode
+    const minutes = Number.parseInt(timerMinutesText, 10)
+    if (mode === 'countdown' && validateTimerMinutes(Number.isNaN(minutes) ? null : minutes)) {
+      toast.error('倒计时分钟数不对', `填 ${TIMER_MINUTES_MIN}–${TIMER_MINUTES_MAX} 之间的整数。`)
+      return
+    }
     setAdding(true)
     try {
-      const created = await createTodo(title)
+      // timerPayload 给的是后端字段名，createTodo 收的是 camelCase 选项 ——
+      // 这里用一个中间变量把它们对上，**转换规则仍然只有一份**（在 timerPayload 里）✓
+      const fields = timerPayload(mode, mode === 'countdown' ? minutes : null)
+      const created = await createTodo(title, {
+        timerMode: fields.timer_mode,
+        timerMinutes: fields.timer_minutes,
+      })
       apply([created, ...items])
       setDraft('')
     } catch (err) {
@@ -112,11 +249,13 @@ export function TodoView() {
     } finally {
       setAdding(false)
     }
-  }, [draft, items, apply, toast])
+  }, [draft, items, apply, toast, timerMode, timerMinutesText])
 
   // ── 勾选 / 取消
   const handleToggle = useCallback(
     async (todo: TodoItem) => {
+      // 完成之前先把正在跑的计时结掉，否则那段时长会随着计时重置而丢掉 ✗
+      if (runningId === todo.id) pauseTimer()
       setBusyId(todo.id)
       try {
         const updated = await updateTodo(todo.id, { completed: !todo.completed })
@@ -133,7 +272,7 @@ export function TodoView() {
         setBusyId(null)
       }
     },
-    [items, apply, toast],
+    [items, apply, toast, runningId, pauseTimer],
   )
 
   // ── 行内重命名
@@ -168,6 +307,8 @@ export function TodoView() {
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return
     const target = pendingDelete
+    // 要删的那条正在计时 → 先停下，否则计时器会指向一条不存在的记录
+    if (runningId === target.id) pauseTimer()
     setPendingDelete(null)
     try {
       await deleteTodo(target.id)
@@ -222,6 +363,39 @@ export function TodoView() {
               添加
             </Button>
           </div>
+
+          {/* 计时是可选的 —— 默认"不计时"，不打扰只想记一笔的人 ✓ */}
+          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-2">
+            <span className="text-2xs text-ink-4">计时</span>
+            {TIMER_CHOICES.map((choice) => (
+              <button
+                key={choice.key}
+                type="button"
+                onClick={() => setTimerMode(choice.key)}
+                aria-pressed={timerMode === choice.key}
+                className={cn(
+                  'rounded-full border px-2.5 py-0.5 text-2xs transition-colors',
+                  timerMode === choice.key
+                    ? 'border-moss-line bg-moss-soft text-moss-ink'
+                    : 'border-line-strong bg-surface-1 text-ink-3 hover:border-moss-line',
+                )}
+              >
+                {choice.label}
+              </button>
+            ))}
+            {timerMode === 'countdown' && (
+              <span className="flex items-center gap-1.5">
+                <input
+                  value={timerMinutesText}
+                  onChange={(e) => setTimerMinutesText(e.target.value)}
+                  inputMode="numeric"
+                  aria-label="倒计时分钟数"
+                  className="w-14 rounded-lg border border-line-strong bg-surface-1 px-2 py-0.5 text-2xs text-ink-1 outline-none focus:border-moss-line"
+                />
+                <span className="text-2xs text-ink-4">分钟</span>
+              </span>
+            )}
+          </div>
         </Card>
       </Reveal>
 
@@ -259,12 +433,15 @@ export function TodoView() {
                 busy={busyId === todo.id}
                 editing={editingId === todo.id}
                 editDraft={editDraft}
+                running={runningId === todo.id}
+                runningSeconds={runningId === todo.id ? runningSeconds : 0}
                 onEditDraft={setEditDraft}
                 onToggle={() => void handleToggle(todo)}
                 onStartEdit={() => startEdit(todo)}
                 onCommitEdit={() => void commitEdit()}
                 onCancelEdit={() => setEditingId(null)}
                 onDelete={() => setPendingDelete(todo)}
+                onToggleTimer={() => (runningId === todo.id ? pauseTimer() : startTimer(todo))}
               />
             </li>
           ))}
@@ -298,27 +475,39 @@ function TodoRow({
   busy,
   editing,
   editDraft,
+  running,
+  runningSeconds,
   onEditDraft,
   onToggle,
   onStartEdit,
   onCommitEdit,
   onCancelEdit,
   onDelete,
+  onToggleTimer,
 }: {
   todo: TodoItem
   today: string
   busy: boolean
   editing: boolean
   editDraft: string
+  /** 这条的计时是不是正在跑 */
+  running: boolean
+  /** 这次运行至今的秒数（未落库的那部分）。不在跑时是 0 */
+  runningSeconds: number
   onEditDraft: (value: string) => void
   onToggle: () => void
   onStartEdit: () => void
   onCommitEdit: () => void
   onCancelEdit: () => void
   onDelete: () => void
+  onToggleTimer: () => void
 }) {
   const view = describe(todo, today)
   const late = isOverdue(todo, today)
+  const timer = timerLabel(todo, runningSeconds)
+  /** 倒计时走到 0（或已过）→ 表盘变红，是"该收尾了"的信号 */
+  const over = isTimerOver(todo, runningSeconds)
+  const canTime = canRunTimer(todo)
 
   return (
     <Card
@@ -388,6 +577,31 @@ function TodoRow({
         >
           <IconClock size={12} />
           {view.due}
+        </span>
+      )}
+
+      {/* 计时条：只有设了计时的任务才出现 ✓ 平时不占地方 */}
+      {timer !== null && (
+        <span
+          className={cn(
+            'flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-2xs',
+            over
+              ? 'border-brick-line bg-brick-soft text-brick-ink'
+              : running
+                ? 'border-moss-line bg-moss-soft text-moss-ink'
+                : 'border-line text-ink-3',
+          )}
+        >
+          <button
+            type="button"
+            onClick={onToggleTimer}
+            disabled={!canTime}
+            aria-label={running ? '暂停计时' : '开始计时'}
+            className="flex items-center gap-1 disabled:opacity-40"
+          >
+            {running ? <IconPause size={11} /> : <IconClock size={11} />}
+            <span className="tabular-nums">{timer}</span>
+          </button>
         </span>
       )}
 

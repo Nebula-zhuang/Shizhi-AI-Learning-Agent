@@ -28,7 +28,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.todo import Todo
+from app.models.todo import TimerMode, Todo
 
 #: 单页上限。防一个超大 limit 把整表拉出来。
 DEFAULT_LIMIT = 100
@@ -86,10 +86,28 @@ def list_todos(
 
 
 def create_todo(
-    db: Session, *, learner_id: str, title: str, due_date: date | None = None
+    db: Session,
+    *,
+    learner_id: str,
+    title: str,
+    due_date: date | None = None,
+    timer_mode: str = TimerMode.NONE,
+    timer_minutes: int | None = None,
 ) -> Todo:
-    """新建一条待办。`title` 的清洗与校验在 schema 层已完成。"""
-    todo = Todo(learner_id=learner_id, title=title, due_date=due_date, completed=False)
+    """新建一条待办。
+
+    `title` 的清洗与校验、以及**计时方式与分钟数的自洽性**
+    都在 schema 层完成（那里能直接给 422 ✓）；这里只管落库。
+    """
+    todo = Todo(
+        learner_id=learner_id,
+        title=title,
+        due_date=due_date,
+        completed=False,
+        timer_mode=timer_mode,
+        timer_minutes=timer_minutes,
+        spent_seconds=0,
+    )
     db.add(todo)
     db.commit()
     db.refresh(todo)
@@ -111,9 +129,19 @@ def update_todo(
     为什么不能在这里用 `.get("due_date")` 兜底：那样"没提供 due_date"
     和"主动把 due_date 设成 null"就分不开了 —— 改个标题会顺手抹掉截止日 ✗
     只遍历 `changes` 里的键，语义才准确。
+
+    ⚠️ 计时那两个字段（`timer_mode` / `timer_minutes`）由 schema 保证**成对出现** ✓
+    （见 `schemas/todo.py` 的第三条说明），所以这里直接逐个 setattr 就是对的 ✓
     """
     todo = get_owned(db, todo_id, learner_id)
-    for field in ("title", "completed", "due_date"):
+    for field in (
+        "title",
+        "completed",
+        "due_date",
+        "timer_mode",
+        "timer_minutes",
+        "spent_seconds",
+    ):
         if field in changes:
             setattr(todo, field, changes[field])
     db.commit()
