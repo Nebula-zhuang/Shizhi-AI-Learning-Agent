@@ -170,9 +170,9 @@ export function recallSentence(memory: {
 
   let head: string
   if (wrongStreak >= 2) {
-    head = `你上次在这个知识点上连错 ${wrongStreak} 次${errorWord ? `，卡在${errorWord}上` : ''}。`
+    head = `你上次在这个知识点上连错 ${wrongStreak} 次${errorWord ? `，卡在${errorWord}` : ''}。`
   } else if (attempts > 0 && errorWord) {
-    head = `你上次试过这个知识点，问题出在${errorWord}上。`
+    head = `你上次试过这个知识点，问题出在${errorWord}。`
   } else if (attempts > 0) {
     head = `你上次学过这个知识点，${masteryWords(mastery)}。`
   } else {
@@ -182,6 +182,54 @@ export function recallSentence(memory: {
   const due = memory.is_due ? '按复习计划，现在正好该回顾了。' : ''
   return `${head}${due}我们先把上次没通的地方捡起来，再往下走。`
 }
+
+/**
+ * 把**正文开头那句原始 `recall_note`** 换成用户能懂的说法。
+ *
+ * ## 为什么需要它
+ *
+ * 后端的 `recall_note` 是**排障文案**，里面有「作答 3 次，掌握度 0.00」这种数据库口径 ✗
+ * （`memory_service.build_recall_note` 是**有意**保留的，别去改它 —— 后端文案不动）。
+ *
+ * `runtime.py` 把它拼在正文最前面，而模型会**原样复述**那句，
+ * 于是「掌握度 0.35」就这么进了用户视野 ✗
+ * 这与产品口径（掌握度只说人话、不给数字）直接冲突。
+ *
+ * ## 替换规则（刻意保守）
+ *
+ * - 没给 `recall_note` → **原样返回**（不产生任何额外内容 ✓）
+ * - 正文**不以那句 `recall_note` 开头** → **原样返回**
+ * - 换上的句子由 `recallSentence()` 用**同一批真实字段**重新组织 ✓
+ *
+ * 对不上就不动 —— 「最差退化成现在的样子，而不是把正文改坏」
+ * （与 `taskCard.ts` 的降级原则一致 ✓）。
+ *
+ * ⚠️ 只替换**开头那一段**，后面的 `---` 分隔线与教学内容**原样保留** ✓
+ */
+export function humanizeRecall(
+  content: string,
+  memory?:
+    | {
+        knowledge_state?: Record<string, unknown> | null
+        is_due?: boolean
+        recall_note?: string
+      }
+    | null,
+): string {
+  const raw = memory?.recall_note
+  if (!raw || !raw.trim()) return content
+  if (!content.startsWith(raw)) return content
+
+  const human = recallSentence({
+    knowledge_state: memory?.knowledge_state ?? null,
+    is_due: memory?.is_due ?? false,
+    recall_note: raw,
+  }).trim()
+  if (!human) return content
+
+  return human + content.slice(raw.length)
+}
+
 
 // --------------------------------------------------------------------------- #
 // 评估反馈

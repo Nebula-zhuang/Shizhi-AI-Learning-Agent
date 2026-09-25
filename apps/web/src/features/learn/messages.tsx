@@ -33,7 +33,7 @@ import {
   cn,
 } from '../../ui'
 import { parseTaskCard, stripInlineMarkup } from './taskCard'
-import { assessmentWords, feedbackHeadline } from './voice'
+import { assessmentWords, feedbackHeadline, humanizeRecall } from './voice'
 
 /* ══════════════════════════════════════════════════════════════════════════
    助教头像与消息骨架
@@ -233,7 +233,9 @@ export function TaskCard({
    ══════════════════════════════════════════════════════════════════════════ */
 
 export function TutorMessage({ turn, onStart }: { turn: TutorTurn; onStart?: () => void }) {
-  const body = turn.content.trim()
+  // 后端正文开头会拼一句排障用的 recall_note（含「掌握度 0.35」这种数据库口径 ✗），
+  // 模型还会原样复述。这里换成用户能懂的说法 —— 对不上就原样返回，不会改坏正文 ✓
+  const body = humanizeRecall(turn.content, turn.memory).trim()
   // 只要这一轮结尾是要作答，就把它渲染成任务卡
   const isTask = parseTaskCard(body) !== null
 
