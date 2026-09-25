@@ -86,6 +86,28 @@ _LEARN_INTENT_HINTS = re.compile(
     r"讲一遍|过一遍|帮我梳理|带我过)"
 )
 
+#: **指向"我保存过的知识"的信号**（P1-2）。命中就进 Loop，让决策模型去判断
+#: 该不该调 `search_saved_knowledge`。
+#:
+#: ⚠️ 为什么必须有这条：`search_saved_knowledge` 是**无条件**注册进工具表的
+#: （没有 available 门槛），所以"模型能不能用它"从来不取决于工具本身 ——
+#: 取决于**这一轮有没有进 Loop**。而 `quick_route` 的兜底是"通用问题直接回答"，
+#: 于是「我保存过什么关于 Java 多态的内容」会被快通道**直接答掉**，
+#: 模型连工具都看不到，只能凭上下文硬答 —— 实测它会答「你没有上传过任何……」（答错）✗
+#:
+#: ⚠️ 命中**只表示"值得让模型看一眼"**，**不是**"直接去调工具"：
+#: 真正的取舍（该调工具、还是该直接回答）由决策模型做 —— 和 `_LEARN_INTENT_HINTS` 同一范式。
+#: 所以这里宁可宽一点：误命中只多花一次决策调用，漏命中则功能完全失效。
+#:
+#: ⚠️ 与 `_MATERIAL_HINTS` 是**两件事**，刻意不合并：那条指向"我上传的资料"（PDF/讲义），
+#: 这条指向"我主动保存的问答"，分属两个工具、两个向量集合（见
+#: `search_saved_knowledge` 的 docstring）。而且它**不要求 kb_size > 0** ——
+#: 用户可能一份资料都没传，却保存过好几条问答。
+_SAVED_KNOWLEDGE_HINTS = re.compile(
+    r"(我.{0,4}(保存|存|记|收藏|整理|学)[过的下来了]|"
+    r"我的?知识库|知识库里)"
+)
+
 #: **时钟类信号**。命中就必须拿到真实时间，**不能靠模型的记忆**。
 #:
 #: 实测踩过的确定性错误：
@@ -214,7 +236,13 @@ def quick_route(
     if _LEARN_INTENT_HINTS.search(text):
         return None
 
-    # 既没提资料、也没时效信号 → **直接回答，不进 Loop**
+    # **指向"我自己保存过什么"的说法 → 进 Loop**（P1-2）。
+    # 同样不在这里下结论：进 Loop 之后由决策模型决定要不要调
+    # `search_saved_knowledge`（见 `_SAVED_KNOWLEDGE_HINTS` 的说明）。
+    if _SAVED_KNOWLEDGE_HINTS.search(text):
+        return None
+
+    # 既没提资料、也没时效信号、也没指向保存内容 → **直接回答，不进 Loop**
     return StudyPlan(["general"], "通用问题，无需检索", "concept")
 
 

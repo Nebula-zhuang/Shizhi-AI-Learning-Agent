@@ -348,3 +348,84 @@ def test_owner_can_read_own_document_metadata(two_accounts) -> None:
         assert client.get(path).status_code == 200, f"{path} 应可访问"
 
     client.cookies.clear()
+
+
+# --------------------------------------------------------------------------- #
+# 跨账号同内容上传（P1-1）
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def stub_pipeline(monkeypatch: pytest.MonkeyPatch):
+    """把流水线本体换成空实现 —— 这里只验 HTTP 契约，不验解析。
+
+    刻意**不打桩** `ingest_runner.submit`（理由见 test_documents_api.py 的同名夹具）。
+    """
+    called: list[int] = []
+
+    async def fake_run_pipeline(document_id: int) -> None:
+        called.append(document_id)
+
+    from app.services import ingest_runner
+
+    monkeypatch.setattr(ingest_runner, "run_pipeline", fake_run_pipeline)
+    return called
+
+
+def _upload_text(content: bytes, filename: str):
+    return client.post(
+        "/api/documents",
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+
+
+def test_cross_account_same_content_is_409_not_500(two_accounts, stub_pipeline) -> None:
+    """别的账号传过同一份内容时，绝不能 500，也不能把别人的文档交出去。
+
+    背景：`documents.file_hash` 是**全局**唯一，而去重查询只在自己账号内找
+    （`document_service.find_by_hash`：去重必须限定同账号，代价是各存一份）。
+    两条规则叠在一起，第二个人上传同一份文件时 INSERT 必然撞唯一键 ——
+    修之前这里是一个 500，而且**演示必然踩到**（样例文件已被演示账号传过）。
+    """
+    # 每次运行内容都不同，避免和开发库里既有数据撞车
+    payload = (
+        f"# 跨账号去重测试 {uuid4().hex[:8]}\n\n"
+        "进程是资源分配的基本单位，线程是调度的基本单位。\n"
+    ).encode("utf-8")
+
+    names = [_name("xa"), _name("xb")]
+    two_accounts.extend(names)
+
+    # 甲先传
+    client.cookies.clear()
+    _register(names[0])
+    first = _upload_text(payload, "甲的笔记.txt")
+    assert first.status_code == 202, first.text
+    assert first.json()["dedup"] is False
+    first_id = first.json()["document"]["id"]
+
+    # 乙传**完全相同**的内容
+    client.cookies.clear()
+    _register(names[1])
+    second = _upload_text(payload, "乙的笔记.txt")
+
+    assert second.status_code == 409, (
+        f"期望 409（明确拒绝），实际 {second.status_code}：{second.text[:200]}"
+    )
+    detail = second.json()["detail"]
+    assert "重复" in detail, f"错误信息要说明原因，实际：{detail!r}"
+
+    # 关键：绝不能把甲的文档交出去
+    assert client.get(f"/api/documents/{first_id}").status_code == 404, (
+        "乙不该能访问甲的文档"
+    )
+    assert client.get(f"/api/documents/{first_id}/status").status_code == 404
+    # 甲的文档也不该出现在乙的列表里
+    listed = client.get("/api/documents").json()
+    ids = [d["id"] for d in listed.get("items", listed if isinstance(listed, list) else [])]
+    assert first_id not in ids, "乙的列表里出现了甲的文档"
+
+    # 没有回归：乙传**不同内容**仍然正常
+    other = _upload_text(f"乙自己的内容 {uuid4().hex}\n".encode("utf-8"), "乙的其他笔记.txt")
+    assert other.status_code == 202, other.text
+    assert other.json()["dedup"] is False
+
+    client.cookies.clear()

@@ -190,6 +190,38 @@ async def _run(db: Session, document: Document) -> None:
         len(warnings),
     )
 
+    # -------------------------------------------------------------- 自动索引
+    # 「上传完就能拿资料问」是产品的核心承诺，而索引在此之前**只能**手动调
+    # `POST /api/rag/index` —— 前端从不调用它，于是从界面上传的资料
+    # 永远检索不到（Phase 6A 审计发现的 P0-2）。
+    #
+    # 这里**复用同一个 `index_runner`**，不复制任何索引逻辑 ✓
+    # 它必须在事件循环里投递，而本函数正是 `async def`，由 `ingest_runner`
+    # 的任务调用 ✓（`index_runner.submit` 的注释明确要求这一点）。
+    #
+    # ⚠️ 三处刻意的保守处理，都是为了"让索引少影响摄取"：
+    #   1. **没有文本块就不投递**。索引空文档没有意义，而且会让**全局**索引状态
+    #      变成 `failed`（`_guarded` 里 `stats.failed and not stats.documents`）
+    #      —— 界面上会显得"资料全坏了"，比不索引更糟 ✗
+    #   2. **投递失败不算摄取失败**。文档此刻已经是 READY，只是暂时没进向量库；
+    #      忙的时候 `submit` 返回 False（已有索引任务在跑），用户稍后手动重试即可。
+    #   3. **不让异常冒泡**。摄取任务绝不能因为"索引投递"而变成失败 ✗
+    try:
+        from app.services import index_runner  # 函数内导入：与 index_runner 自己的习惯一致，规避导入环
+
+        if not document.chunk_count:
+            logger.info("文档 id=%s 没有文本块，跳过索引", document.id)
+        elif index_runner.submit([document.id]):
+            logger.info("文档 id=%s 已自动投递索引任务", document.id)
+        else:
+            logger.warning(
+                "文档 id=%s 未能自动索引（多半是已有索引任务在跑），"
+                "可稍后手动 POST /api/rag/index 重试",
+                document.id,
+            )
+    except Exception:  # noqa: BLE001 - 索引投递失败绝不能把摄取判成失败
+        logger.exception("文档 id=%s 自动投递索引任务时出错（摄取本身已完成）", document.id)
+
 
 def _progress_reporter(db: Session, document: Document):
     """返回一个把抽取进度写回数据库的回调。"""

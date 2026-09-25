@@ -108,6 +108,73 @@ def test_empty_question_takes_fast_path() -> None:
 
 
 # =========================================================================== #
+# 一之二、"我保存过什么" → 进循环（P1-2）
+# =========================================================================== #
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 用户需求里逐字列出的六种说法
+        "我之前保存的 Java 多态笔记呢？",
+        "我保存过的关于 Spring IOC 的内容",
+        "我之前记的进程笔记呢",
+        "我收藏的那几条讲的是什么",
+        "我的知识库里有关于死锁的吗",
+        "我以前整理过的内容给我看看",
+        # 工具描述里自己举过的例子，一并锁住
+        "帮我翻翻我存过的笔记",
+        "我以前学过 JVM 吗",
+    ],
+)
+def test_saved_knowledge_questions_enter_the_loop(question: str) -> None:
+    """指向"我自己保存过的知识" → **交给循环**。
+
+    ⚠️ 这条规则的作用**只是把问题送进循环**，不是"直接去调工具" ——
+    真正该不该调 `search_saved_knowledge` 由决策模型判断（与 `_LEARN_INTENT_HINTS` 同范式）。
+
+    为什么必须进循环：`search_saved_knowledge` 是**无条件**注册进工具表的，
+    所以它能不能被用到，唯一取决于"这一轮有没有进循环"。
+    `quick_route` 的兜底是"通用问题直接回答、不进循环"，于是这类问题过去会被
+    快通道直接答掉，模型连工具都看不到 —— 实测它会答「你没有上传过任何……」✗
+
+    `kb_size=0` 是**刻意的**：用户可能一份资料都没传，却保存过好几条问答。
+    两条信号指向的是两个不同的存储（`_MATERIAL_HINTS` 管资料、这条管保存的知识）。
+    """
+    assert (
+        free_study.quick_route(
+            question, has_attachments=False, kb_size=0, web_available=True
+        )
+        is None
+    ), f"{question} 应当交给 Agent 循环"
+
+
+def test_saved_knowledge_hints_do_not_catch_plain_recall() -> None:
+    """「我记得…」是"凭记忆陈述"，不是"我以前存过" —— 不能被这条规则吃掉。
+
+    这条断言直接打在正则上，而不是打在 `quick_route` 的返回值上：
+    别的分支（例如 `_RECENT_HINTS` 会因为「发布」把这句话判成时效问题）会干扰整体结论，
+    而这里要锁的是**这条规则自己**的边界。
+    """
+    for text in (
+        "我记得 Java 是 1995 年发布的",
+        "我记得老师说进程是资源分配的单位",
+        "我记不住这个概念",
+        "我存在硬盘上了",
+    ):
+        assert free_study._SAVED_KNOWLEDGE_HINTS.search(text) is None, (
+            f"「{text}」不该被 saved-knowledge 规则命中"
+        )
+
+
+def test_plain_concept_question_still_takes_fast_path() -> None:
+    """普通概念问答**必须**继续走快通道 —— 这条规则不能把正常问题也拖进循环。"""
+    plan = free_study.quick_route(
+        "什么是 Java 多态？", has_attachments=False, kb_size=0, web_available=True
+    )
+    assert plan is not None, "普通概念问题不该进循环"
+    assert plan.capabilities == ["general"]
+
+
+# =========================================================================== #
 # 二、决策解析：无论模型返回什么都必须得到可用结果
 # =========================================================================== #
 def test_parse_decision_reads_tool_call() -> None:
@@ -596,3 +663,69 @@ def test_quick_route_still_sends_attachments_into_the_loop() -> None:
     assert free_study.quick_route(
         "什么是 JVM？", has_attachments=False, kb_size=0, web_available=True
     )
+
+
+# =========================================================================== #
+# 四之二、工具选择规则：保存的知识 vs 上传的资料（P1-2）
+# =========================================================================== #
+def test_decide_prompt_names_saved_knowledge() -> None:
+    """「怎么选」必须**点名** `search_saved_knowledge`，并写清六种典型说法。
+
+    为什么要有这条：`search_saved_knowledge` 是**无条件**注册进工具表的，
+    所以"模型会不会用它"完全取决于提示词有没有告诉它什么时候用。
+    P1-2 修之前，「怎么选」四条里**一条都没提它** —— 于是模型看到
+    「我保存过的关于 Java 多态的内容」会去调 `retrieve_knowledge`，
+    然后答出「你没有上传过任何笔记」✗（实测）。
+    """
+    text = _prompt_file()
+
+    assert "search_saved_knowledge" in text, (
+        "「怎么选」里没有 search_saved_knowledge —— 模型不会想到它"
+    )
+    for phrase in (
+        "我之前保存的",
+        "我保存过的",
+        "我之前记的",
+        "我收藏的",
+        "我的知识库里",
+        "我以前整理过的",
+    ):
+        assert phrase in text, f"提示词缺少这条典型说法：{phrase}"
+
+
+def test_decide_prompt_keeps_the_two_tools_apart() -> None:
+    """两个工具必须**明确区分**，且上传资料的优先级仍在前。
+
+    它们是两件事（见 `search_saved_knowledge` 的 docstring）：
+      · `retrieve_knowledge`   → 他**上传的** PDF / 讲义
+      · `search_saved_knowledge` → 他**主动保存的**那几轮问答
+    只说"用 search_saved_knowledge"而不说清分工，模型仍会把「我保存的」读成"他的资料"。
+
+    顺序即优先级：上传资料那条必须排在保存知识**前面**，
+    这样"根据我上传的 PDF 讲讲"仍然优先走 `retrieve_knowledge`。
+    """
+    text = _prompt_file()
+    section = text.split("## 怎么选（按优先级）", 1)[1].split("\n## ", 1)[0]
+
+    assert "retrieve_knowledge" in section and "search_saved_knowledge" in section
+    assert section.index("retrieve_knowledge") < section.index("search_saved_knowledge"), (
+        "上传资料那条必须排在保存知识前面（顺序即优先级）"
+    )
+    # 说清分工：一边是"上传的"，一边是"保存的"
+    assert "上传" in section, "要写明 retrieve_knowledge 找的是**上传的**资料"
+    assert "保存" in section, "要写明 search_saved_knowledge 找的是**保存的**知识"
+
+
+@pytest.mark.asyncio
+async def test_saved_knowledge_rule_reaches_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不只是文件里写了 —— 要确认它**真的被渲染进发给模型的提示词**。
+
+    上面那条读的是 .md 文件，这条读的是 render 之后的成品，
+    能挡住"改了模板但没接上"这类问题。
+    """
+    prompt = await _render_decide_prompt(monkeypatch)
+
+    assert "search_saved_knowledge" in prompt, "规则没有进入实际发给模型的提示词"
+    assert "我之前保存的" in prompt, "典型说法没有进入实际提示词"

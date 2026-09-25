@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -140,14 +141,44 @@ async def upload_document(
         storage_path = storage.finalize_source(temp_path, file_hash, file_name)
         temp_path = None
 
-        document = document_service.create_document(
-            db,
-            owner_learner_id=learner_id,
-            file_name=file_name,
-            file_size=size,
-            file_hash=file_hash,
-            storage_path=storage_path,
-        )
+        try:
+            document = document_service.create_document(
+                db,
+                owner_learner_id=learner_id,
+                file_name=file_name,
+                file_size=size,
+                file_hash=file_hash,
+                storage_path=storage_path,
+            )
+        except IntegrityError as exc:
+            # `documents.file_hash` 是**全局**唯一，而去重查询只在自己账号内找
+            # （`document_service.find_by_hash` 的 docstring 写明了：
+            #  去重**必须**限定同账号，代价是同一文件各存一份，这是隐私隔离的成本）。
+            # 两条规则叠在一起，别的账号传过同一份内容时，这里的 INSERT 必然撞键 ✗
+            #
+            # 处理原则 —— **绝不跨账号复用**：
+            #   · 复用会把别人的 document_id 交给当前用户，而所有查询都按归属过滤，
+            #     他既打不开（404），又可能从提示语里推断出"别人传过什么" ✗
+            #   · 所以跨账号一律 409，把原因说清楚，而不是 500
+            db.rollback()
+            mine = document_service.find_by_hash(db, file_hash, learner_id=learner_id)
+            if mine is not None:
+                # 自己账号内的**并发**重复投递（两次上传同时走到这里）
+                created_at = mine.created_at.strftime("%Y-%m-%d %H:%M")
+                logger.info("并发去重命中：%s -> document_id=%s", file_name, mine.id)
+                return UploadResponse(
+                    document=DocumentSummary.model_validate(mine),
+                    dedup=True,
+                    message=f"该文件已于 {created_at} 处理过，直接复用已有结果，未重复解析。",
+                )
+            logger.info("跨账号重复内容被拒：%s（file_hash 已属于其它账号）", file_name)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "这份文件的内容和已有资料完全重复，但它归另一个账号所有，"
+                    "本账号不能复用。请对文件稍作修改（例如加一行自己的笔记）后再上传。"
+                ),
+            ) from exc
 
         if not ingest_runner.submit(document.id):
             document_service.mark_failed(
