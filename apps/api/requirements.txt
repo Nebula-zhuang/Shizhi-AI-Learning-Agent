@@ -16,6 +16,8 @@ SQLAlchemy>=2.0.36,<3.0
 alembic>=1.14,<2.0
 PyMySQL>=1.1.1,<2.0
 cryptography>=43.0                 # MySQL 8+/9 的 caching_sha2_password 认证需要
+PyJWT>=2.8,<3.0                    # JWT 会话令牌签发与校验（app/core/security.py 直接 import jwt）
+bcrypt                             # 口令哈希（代码直接 import bcrypt，此前仅靠传递依赖才装上）
 
 # --- LLM 与 HTTP ---
 openai>=1.55,<2.0                  # OpenAI 兼容网关，指向 DeepSeek / Qwen / GLM 均可
