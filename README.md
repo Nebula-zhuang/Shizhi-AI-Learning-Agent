@@ -531,72 +531,9 @@ python scripts/smoke_test.py                # 全组件冒烟
 
 ---
 
-## 十一、当前状态与已知限制
 
-### 11.1 当前完成状态
 
-当前版本已经完成核心产品链路、Agent Loop、RAG、联网检索、多模态、Tutor Agent、知识保存、学习状态、待办、学习报告以及权限隔离等主要能力。
-
-| 能力 | 当前状态 |
-| --- | --- |
-| 自由学习空间 | ✅ 已完成 |
-| 资料解析与知识抽取 | ✅ 已完成 |
-| 知识地图 | ✅ 已完成 |
-| RAG 检索与原文回链 | ✅ 已完成 |
-| Saved Knowledge 跨会话检索 | ✅ 已完成 |
-| Tavily MCP 联网搜索 | ✅ 已完成 |
-| MCP 故障回退 Tavily REST | ✅ 已完成 |
-| 图片 / 多模态分析 | ✅ 已完成 |
-| Tutor Agent | ✅ 已完成 |
-| 学习状态与长期记忆 | ✅ 已完成 |
-| 学习建议 → Tutor 学习目标 | ✅ 已完成 |
-| 个人 Todo 与任务计时 | ✅ 已完成 |
-| 学习报告 | ✅ 已完成 |
-| 密码修改 | ✅ 已完成 |
-| 跨账号资料隔离 | ✅ 已验收 |
-| Agent Runtime 超时 / 调用预算 | ✅ 已实现 |
-| Phase 6A 安全与路由验收 | ✅ 已完成 |
-
-### 11.2 当前已知外部限制
-
-**Embedding 云端额度。**
-
-RAG 与 Saved Knowledge 的向量化依赖配置的 Embedding 服务。当前开发环境使用阿里云百炼 Embedding API；如果该 API 的免费额度耗尽，索引和向量检索会受到影响。
-
-这属于**外部服务额度限制，不是项目代码错误**。项目已经对 Embedding Provider 做了抽象，后续可以替换为其他 OpenAI-compatible / 本地 Embedding 实现。
-
-### 11.3 工程上的已知取舍
-
-| 项目 | 当前做法 | 后续方向 |
-| --- | --- | --- |
-| Agent 工具调用 | 自研 JSON Tool Calling | 根据模型实际效果决定是否接入原生 Function Calling |
-| Agent 数量 | 单 Agent + Tutor 状态机 | 当前不引入 Multi-Agent |
-| 向量库 | Chroma 本地持久化 | 多实例部署时可替换为独立向量数据库 |
-| 联网 | MCP 优先 + Tavily REST 回退 | 保持协议层与 Provider 解耦 |
-| Runtime | 自研轻量状态机 | 当前不引入 LangGraph，避免为简单场景增加框架复杂度 |
-
-### 11.4 环境注意事项
-
-**`data/chroma` 只支持单写者。** SQLite 后端不支持多进程并发写 ——  
-两个进程同时访问同一目录会让检索间歇性失败，且报错很难联想到并发。  
-本地开发请确保只有一个后端进程在跑。
-
-**`docker-compose.yml` 未实测。** 它只是备用方案，**从未运行验证过** ——  
-请以本机 MySQL + pip 的启动步骤（见第九节）为准。
-
-### 11.5 下一步
-
-当前代码已经完成一次完整的 Phase 6A 验收并冻结核心功能。下一阶段重点不再是继续堆功能，而是：
-
-1. GitHub README 与项目展示完善
-2. Demo 演示流程整理
-3. 架构图与 Agent 决策链说明
-4. 项目答辩 / 面试讲解准备
-5. 系统学习项目源码：FastAPI → Agent Runtime → Tool / Skill → RAG → MCP → SSE → Tutor / Learning State
-
-> **原则：先把已经做出来的东西讲清楚，再继续扩功能。**
-
-## 十二、License 与致谢 
+## 十一、License 与致谢 
 
 ### License
 
