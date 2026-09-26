@@ -377,6 +377,14 @@ def _upload_text(content: bytes, filename: str):
     )
 
 
+def _upload_attachment(content: bytes, filename: str):
+    """附件端点（独立于资料端点的那条路）。"""
+    return client.post(
+        "/api/study/attachments",
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+
+
 def test_cross_account_same_content_is_409_not_500(two_accounts, stub_pipeline) -> None:
     """别的账号传过同一份内容时，绝不能 500，也不能把别人的文档交出去。
 
@@ -427,5 +435,61 @@ def test_cross_account_same_content_is_409_not_500(two_accounts, stub_pipeline) 
     other = _upload_text(f"乙自己的内容 {uuid4().hex}\n".encode("utf-8"), "乙的其他笔记.txt")
     assert other.status_code == 202, other.text
     assert other.json()["dedup"] is False
+
+    client.cookies.clear()
+
+
+def test_attachment_cross_account_same_content_is_409_not_500(two_accounts, stub_pipeline) -> None:
+    """**附件端点**也必须和资料端点同款处理（Phase 6A 最终验收发现的漏网）。
+
+    `POST /api/study/attachments` 自己的 docstring 就写着：
+
+        这条路刻意和 `POST /api/documents` 走同一套存储与摄取…
+        两套实现迟早会在"去重规则""大小限制""格式判定"上分叉。
+
+    结果真分叉了：资料端点修好之后，附件端点遇到**别的账号传过同一份内容**
+    仍然直接 500（同一个 `documents.uq_documents_file_hash`）。
+
+    这两条用例刻意挨着放 —— 它们锁的是**同一个规则在两个入口上一致**，
+    以后谁改了一处忘了另一处，这里会立刻红。
+    """
+    payload = (
+        f"# 附件跨账号去重测试 {uuid4().hex[:8]}\n\n"
+        "这是一份用来验证附件端点去重规则的文本。\n"
+    ).encode("utf-8")
+
+    names = [_name("ata"), _name("atb")]
+    two_accounts.extend(names)
+
+    # ── 甲：新文件 202 → 再传一次复用（每个账号只注册一次）
+    client.cookies.clear()
+    _register(names[0])
+
+    first = _upload_attachment(payload, "甲的附件.txt")
+    assert first.status_code in (200, 201), first.text
+    assert first.json().get("dedup") is False
+    first_id = first.json()["document_id"]
+
+    again = _upload_attachment(payload, "甲再传一次.txt")
+    assert again.status_code in (200, 201), again.text
+    assert again.json().get("dedup") is True, "同账号重复上传应当复用"
+    assert again.json()["document_id"] == first_id, "复用应当返回同一个 document_id"
+
+    # ── 乙：传完全相同的内容 → 必须 409，且不泄露甲的 id
+    client.cookies.clear()
+    _register(names[1])
+    second = _upload_attachment(payload, "乙的附件.txt")
+
+    assert second.status_code == 409, (
+        f"期望 409（明确拒绝），实际 {second.status_code}：{second.text[:200]}"
+    )
+    assert "重复" in second.json()["detail"], "错误信息要说明原因"
+    assert str(first_id) not in second.text, "409 响应里泄露了对方的 document_id"
+    assert client.get(f"/api/documents/{first_id}").status_code == 404, "乙不该能访问甲的文档"
+
+    # ── 没有回归：全新内容照旧正常
+    fresh = _upload_attachment(f"全新附件 {uuid4().hex}\n".encode("utf-8"), "全新的.txt")
+    assert fresh.status_code in (200, 201), fresh.text
+    assert fresh.json().get("dedup") is False
 
     client.cookies.clear()

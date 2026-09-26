@@ -19,6 +19,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agent import free_study
@@ -589,14 +590,44 @@ async def upload_attachment(
         storage_path = storage.finalize_source(temp_path, file_hash, file_name)
         temp_path = None  # 已归位，后面任何异常都不该再删它
 
-        document = document_service.create_document(
-            db,
-            owner_learner_id=learner_id,
-            file_name=file_name,
-            file_size=size,
-            file_hash=file_hash,
-            storage_path=storage_path,
-        )
+        try:
+            document = document_service.create_document(
+                db,
+                owner_learner_id=learner_id,
+                file_name=file_name,
+                file_size=size,
+                file_hash=file_hash,
+                storage_path=storage_path,
+            )
+        except IntegrityError as exc:
+            # 与 `POST /api/documents` **同一套处理方式**（那边已验收）：
+            # `documents.file_hash` 是**全局**唯一，而上面的去重查询只在自己账号内找，
+            # 于是别的账号传过同一份内容时这里的 INSERT 必然撞键 ✗
+            #
+            # 原则：**绝不跨账号复用** —— 复用会把别人的 document_id 交给当前用户
+            # （他打不开，还可能从提示语推断出"别人传过什么"）。跨账号一律 409。
+            db.rollback()
+            mine = document_service.find_by_hash(db, file_hash, learner_id=learner_id)
+            if mine is not None:
+                # 自己账号内的**并发**重复投递（两次上传同时走到这里）
+                logger.info("附件并发去重命中：%s -> document_id=%s", file_name, mine.id)
+                return AttachmentUploadResponse(
+                    document_id=mine.id,
+                    file_name=mine.file_name,
+                    file_type=mine.file_type,
+                    file_size=mine.file_size,
+                    is_image=study_service.is_image_extension(mine.file_name),
+                    parse_status=mine.parse_status,
+                    dedup=True,
+                )
+            logger.info("附件跨账号重复内容被拒：%s（file_hash 已属于其它账号）", file_name)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "这份附件的内容和已有资料完全重复，但它归另一个账号所有，"
+                    "本账号不能复用。请对文件稍作修改（例如重命名或截图重存）后再上传。"
+                ),
+            ) from exc
 
         # 投递摄取是**顺手做的事**，不是前置条件：
         # 看图只需要 storage_path，它在落盘那一刻就有了。
