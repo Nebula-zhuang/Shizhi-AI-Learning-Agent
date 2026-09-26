@@ -118,3 +118,25 @@ scripts/_scratch/
 # 但仍然入库 —— 它让 clone 下来就能直接演示完整链路，价值大于几百 KB 的体积。
 # 如果你希望保持仓库纯净，取消下面一行的注释即可：
 # samples/
+
+# ---------------------------------------------------------------- 非 Shizhi 的并行产物
+# 初赛 PPT 制作那条工作线产生的东西：CloudStudio 工作区配置 + 一个**独立的** PPT 演示前端
+# + PPT 生成工具的中间产物。
+#
+# ⚠️ 它们**不是 Shizhi 源码**，判定依据（硬证据）：
+#   · `frontend/package.json` 的 `name` 是 `ppt-frontend`，而项目前端 `apps/web` 是 `shizhi-web`
+#   · `frontend/` 用 `vite.config.js`（项目是 `.ts`），且**没有** `src/main.tsx` / `src/App.tsx`
+#   · `frontend/README.md` 自己写着「# PPT Frontend - Vite Project」
+#   · 仓库已跟踪文件中，这些路径被引用 **0 处**
+#
+# 它们**保留在本地**，只是不参与版本控制 —— 尤其 `frontend/`：
+# 含自己的 `node_modules`，合计 3878 个文件 / 约 46.7 MB，一旦 `git add -A` 就会被整包推上去。
+#
+# 用 `/` 开头的锚定写法：只匹配仓库根目录下这些路径，避免误伤将来可能出现的同名子目录。
+/.cloudstudio
+/frontend/
+/artifacts/
+/docs/project.json
+/docs/page-global-config.json
+/docs/pages.json
+/docs/product/
